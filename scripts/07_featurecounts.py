@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """
-Step 07 -- featureCounts read aggregation.
+Step 07 -- Read count aggregation.
 
-Runs featureCounts for each trimming method and each option set defined
-in config.  Produces raw count matrices and parsed summary statistics.
+Supports two backends (set ``featurecounts.backend`` in config):
+
+  - ``featurecounts``: calls the subread featureCounts binary (DEFAULT on
+    servers where it is installed).
+  - ``htseq``: uses HTSeq-count via Python -- ``pip install HTSeq``.
+    No compiled binaries needed beyond pysam.
+
+Both backends produce the same output: a clean gene x sample count matrix.
 """
 
 from __future__ import annotations
@@ -32,9 +38,9 @@ from src.utils import (
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# featureCounts runner
-# ---------------------------------------------------------------------------
+# =========================================================================
+# Backend 1: featureCounts (subread binary)
+# =========================================================================
 
 def run_featurecounts(
     bam_files: List[Path],
@@ -43,10 +49,7 @@ def run_featurecounts(
     cfg: Dict[str, Any],
     option_set: Dict[str, Any],
 ) -> Path:
-    """Run featureCounts with a specific option set.
-
-    Returns the path to the count matrix output.
-    """
+    """Run featureCounts with a specific option set."""
     exe = cfg["tools"].get("featurecounts", "featureCounts")
     threads = cfg["project"].get("threads", 4)
     fc_cfg = cfg["featurecounts"]
@@ -61,7 +64,6 @@ def run_featurecounts(
         "-s", str(fc_cfg.get("strandedness", 2)),
     ]
 
-    # Optional flags from option set
     if option_set.get("B", False):
         cmd.append("-B")
     if option_set.get("P", False):
@@ -76,23 +78,127 @@ def run_featurecounts(
     if extra:
         cmd.extend(extra.split())
 
-    # Add BAM files
     cmd.extend(str(b) for b in bam_files)
 
     run_cmd(cmd, description=f"featureCounts -> {out_path.name}")
     return out_path
 
 
-# ---------------------------------------------------------------------------
-# Clean count matrix (remove .bam suffix, skip comment lines)
-# ---------------------------------------------------------------------------
+# =========================================================================
+# Backend 2: HTSeq (pure Python)
+# =========================================================================
+
+def run_htseq_count(
+    bam_files: List[Path],
+    gtf: str,
+    out_path: Path,
+    cfg: Dict[str, Any],
+    option_set: Dict[str, Any],
+    sample_names: List[str],
+) -> Path:
+    """Count reads using HTSeq (pure Python, no compiled binary needed).
+
+    Produces a count matrix in the same format as featureCounts clean output:
+    Geneid<TAB>sample1<TAB>sample2<TAB>...
+
+    Parameters
+    ----------
+    bam_files : list of Path
+        Sorted, indexed BAM files (one per sample).
+    gtf : str
+        Path to GTF annotation.
+    out_path : Path
+        Output path for the combined count matrix.
+    cfg : dict
+        Pipeline config.
+    option_set : dict
+        Option set (Q for MAPQ filter, etc.).
+    sample_names : list of str
+        Sample names corresponding to bam_files.
+    """
+    import HTSeq
+
+    fc_cfg = cfg["featurecounts"]
+    strandedness = int(fc_cfg.get("strandedness", 2))
+    feature_type = fc_cfg.get("feature_type", "exon")
+    attribute = fc_cfg.get("attribute", "gene_id")
+    minaqual = int(option_set.get("Q", 0))
+
+    # Map strandedness int to HTSeq string
+    strand_map = {0: "no", 1: "yes", 2: "reverse"}
+    stranded = strand_map.get(strandedness, "reverse")
+
+    logger.info("  HTSeq: loading GTF features (type=%s, attr=%s)...",
+                feature_type, attribute)
+
+    # Build feature array from GTF
+    gtf_features = HTSeq.GenomicArrayOfSets("auto", stranded=(stranded != "no"))
+    gene_ids = set()
+
+    for feature in HTSeq.GFF_Reader(gtf):
+        if feature.type == feature_type:
+            gid = feature.attr.get(attribute, None)
+            if gid:
+                gene_ids.add(gid)
+                if stranded != "no":
+                    gtf_features[feature.iv] += gid
+                else:
+                    gtf_features[feature.iv] += gid
+
+    gene_ids = sorted(gene_ids)
+    logger.info("  HTSeq: %d genes from GTF", len(gene_ids))
+
+    # Count each BAM file
+    all_counts: Dict[str, Dict[str, int]] = {}
+
+    for bam_path, sname in zip(bam_files, sample_names):
+        logger.info("  HTSeq: counting %s ...", sname)
+        counts: Dict[str, int] = {g: 0 for g in gene_ids}
+        n_assigned = 0
+        n_total = 0
+
+        bam_reader = HTSeq.BAM_Reader(str(bam_path))
+
+        for alnmt in bam_reader:
+            n_total += 1
+
+            if not alnmt.aligned:
+                continue
+            if alnmt.aQual < minaqual:
+                continue
+
+            gene_set = set()
+            for iv, val in gtf_features[alnmt.iv].steps():
+                gene_set |= val
+
+            if len(gene_set) == 1:
+                gene = list(gene_set)[0]
+                counts[gene] += 1
+                n_assigned += 1
+
+        all_counts[sname] = counts
+        logger.info("    %s: %d/%d reads assigned", sname, n_assigned, n_total)
+
+    # Write combined count matrix (Geneid + sample columns)
+    ensure_dirs(out_path.parent)
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write("Geneid\t" + "\t".join(sample_names) + "\n")
+        for gene in gene_ids:
+            row = [gene] + [str(all_counts[s].get(gene, 0)) for s in sample_names]
+            fh.write("\t".join(row) + "\n")
+
+    logger.info("  HTSeq count matrix -> %s", out_path)
+    return out_path
+
+
+# =========================================================================
+# Clean count matrix (for featureCounts raw output)
+# =========================================================================
 
 def clean_count_matrix(raw_path: Path, clean_path: Path, samples: list) -> None:
-    """Clean the featureCounts output to a simple gene x sample matrix.
+    """Clean featureCounts output to a simple gene x sample matrix.
 
-    - Removes comment lines (starting with #)
-    - Keeps only Geneid and count columns (skips Chr, Start, End, Strand, Length)
-    - Strips ``.bam`` and STAR prefix from column headers
+    Removes comment lines, strips annotation columns and .bam suffix.
     """
     with open(raw_path, "r", encoding="utf-8") as fin, \
          open(clean_path, "w", encoding="utf-8") as fout:
@@ -104,19 +210,15 @@ def clean_count_matrix(raw_path: Path, clean_path: Path, samples: list) -> None:
             parts = line.strip().split("\t")
 
             if parts[0] == "Geneid":
-                # Header line -- columns: Geneid, Chr, Start, End, Strand, Length, sample1.bam, ...
                 header = ["Geneid"]
                 for col in parts[6:]:
-                    # Clean: remove path and _Aligned.sortedByCoord.out.bam
                     name = Path(col).name
                     name = re.sub(r"_?Aligned\.sortedByCoord\.out\.bam$", "", name)
                     name = re.sub(r"\.bam$", "", name)
-                    # Remove trailing underscore from STAR prefix
                     name = name.rstrip("_")
                     header.append(name)
                 fout.write("\t".join(header) + "\n")
             else:
-                # Data line: Geneid + counts (skip annotation columns 1-5)
                 gene_id = parts[0]
                 counts = parts[6:]
                 fout.write(gene_id + "\t" + "\t".join(counts) + "\n")
@@ -124,22 +226,15 @@ def clean_count_matrix(raw_path: Path, clean_path: Path, samples: list) -> None:
     logger.info("Cleaned count matrix -> %s", clean_path)
 
 
-# ---------------------------------------------------------------------------
-# Parse featureCounts summary
-# ---------------------------------------------------------------------------
-
 def parse_fc_summary(summary_path: Path) -> Dict[str, Dict[str, str]]:
-    """Parse featureCounts .summary file.
-
-    Returns dict of {category: {sample: count}}.
-    """
+    """Parse featureCounts .summary file."""
     stats: Dict[str, Dict[str, str]] = {}
     if not summary_path.exists():
         return stats
 
     with open(summary_path, encoding="utf-8") as fh:
         header = fh.readline().strip().split("\t")
-        sample_names = header[1:]  # first col is "Status"
+        sample_names = header[1:]
         for line in fh:
             parts = line.strip().split("\t")
             status = parts[0]
@@ -150,14 +245,14 @@ def parse_fc_summary(summary_path: Path) -> Dict[str, Dict[str, str]]:
     return stats
 
 
-# ---------------------------------------------------------------------------
+# =========================================================================
 # Main
-# ---------------------------------------------------------------------------
+# =========================================================================
 
 def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None:
     """Execute step 07."""
     logger.info("=" * 60)
-    logger.info("STEP 07: featureCounts")
+    logger.info("STEP 07: Read count aggregation")
     logger.info("=" * 60)
 
     results_dir = Path(cfg["_results_dir"])
@@ -168,20 +263,26 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     methods = methods_override or get_enabled_methods(cfg)
     option_sets = cfg["featurecounts"].get("option_sets", {"default": {}})
 
+    # Determine counting backend
+    backend = cfg["featurecounts"].get("backend", "featurecounts")
+    logger.info("Counting backend: %s", backend)
+
     all_summary_rows: List[Dict[str, str]] = []
 
     for method in methods:
-        logger.info("--- featureCounts for method: %s ---", method)
+        logger.info("--- Counting for method: %s ---", method)
         star_dir = results_dir / method / "star"
         fc_dir = results_dir / method / "featurecounts"
         ensure_dirs(fc_dir)
 
         # Collect BAM files in deterministic order
         bam_files: List[Path] = []
+        sample_names: List[str] = []
         for s in samples:
             bam = star_dir / f"{s.sample_name}_Aligned.sortedByCoord.out.bam"
             if bam.exists():
                 bam_files.append(bam)
+                sample_names.append(s.sample_name)
             else:
                 logger.warning("BAM not found: %s", bam)
 
@@ -192,29 +293,40 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         for opt_name, opt_params in option_sets.items():
             logger.info("  Option set: %s", opt_name)
 
-            raw_counts = fc_dir / f"counts_{opt_name}.tsv"
-            run_featurecounts(bam_files, gtf, raw_counts, cfg, opt_params)
+            if backend == "htseq":
+                # HTSeq produces a clean matrix directly
+                clean_counts = fc_dir / f"count_matrix_{opt_name}.tsv"
+                run_htseq_count(
+                    bam_files, gtf, clean_counts, cfg, opt_params, sample_names,
+                )
+                # No separate summary file for HTSeq
 
-            # Clean matrix
-            clean_counts = fc_dir / f"count_matrix_{opt_name}.tsv"
-            clean_count_matrix(raw_counts, clean_counts, samples)
+            else:
+                # featureCounts binary
+                raw_counts = fc_dir / f"counts_{opt_name}.tsv"
+                run_featurecounts(bam_files, gtf, raw_counts, cfg, opt_params)
 
-            # Parse summary
-            summary_file = Path(str(raw_counts) + ".summary")
-            summary = parse_fc_summary(summary_file)
+                # Clean matrix
+                clean_counts = fc_dir / f"count_matrix_{opt_name}.tsv"
+                clean_count_matrix(raw_counts, clean_counts, samples)
 
-            # Record assigned reads for comparison
-            assigned = summary.get("Assigned", {})
-            for sname, count in assigned.items():
-                clean_sname = Path(sname).name
-                clean_sname = re.sub(r"_?Aligned\.sortedByCoord\.out\.bam$", "", clean_sname)
-                clean_sname = clean_sname.rstrip("_")
-                all_summary_rows.append({
-                    "method": method,
-                    "option_set": opt_name,
-                    "sample": clean_sname,
-                    "assigned_reads": count,
-                })
+                # Parse summary
+                summary_file = Path(str(raw_counts) + ".summary")
+                summary = parse_fc_summary(summary_file)
+
+                assigned = summary.get("Assigned", {})
+                for sname, count in assigned.items():
+                    clean_sname = Path(sname).name
+                    clean_sname = re.sub(
+                        r"_?Aligned\.sortedByCoord\.out\.bam$", "", clean_sname
+                    )
+                    clean_sname = clean_sname.rstrip("_")
+                    all_summary_rows.append({
+                        "method": method,
+                        "option_set": opt_name,
+                        "sample": clean_sname,
+                        "assigned_reads": count,
+                    })
 
     # Write featureCounts summary
     fc_summary_path = results_dir / "featurecounts_summary.tsv"
@@ -236,7 +348,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Step 07: featureCounts")
+    parser = argparse.ArgumentParser(description="Step 07: Read counting")
     parser.add_argument("--config", required=True)
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--methods", nargs="*", default=None)

@@ -126,8 +126,10 @@ trimming:
     extra_args: ""
 
 # -- featureCounts options ----------------------------------------------------
-# Multiple option sets can be defined and compared.
+# Backend: "featurecounts" (subread binary) or "htseq" (pure Python).
+# HTSeq needs only: pip install HTSeq pysam
 featurecounts:
+  backend: "featurecounts"     # "featurecounts" or "htseq"
   strandedness: 2              # 0=unstranded, 1=stranded, 2=reverse-stranded
   feature_type: "exon"
   attribute: "gene_id"

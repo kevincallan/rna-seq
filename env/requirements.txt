@@ -1,4 +1,7 @@
-# Python dependencies (bioinformatics tools installed via conda/system)
+# =============================================================================
+# Python dependencies for the RNA-seq pipeline
+# =============================================================================
+# Core
 pyyaml>=6.0
 pandas>=1.5
 numpy>=1.23
@@ -8,5 +11,12 @@ seaborn>=0.12
 scikit-learn>=1.1
 markdown>=3.4
 pytest>=7.0
-# Pure-Python DESeq2 -- eliminates R dependency for DE analysis
-pydeseq2>=0.4
+
+# Pure-Python bioinformatics (eliminates R and most compiled-binary deps)
+pydeseq2>=0.4            # DE analysis -- replaces R DESeq2
+pysam>=0.21              # BAM indexing/reading -- replaces samtools
+HTSeq>=2.0               # Read counting -- replaces featureCounts (subread)
+
+# Note: The only tool that MUST be a compiled binary is the read mapper
+# (STAR or HISAT2). There is no pure-Python short-read aligner.
+# cutadapt, multiqc, deeptools (bamCoverage) are all pip-installable Python.

@@ -78,13 +78,18 @@ def map_sample_star(
 
 
 def index_bam(bam: Path, cfg: Dict[str, Any]) -> None:
-    """Index a BAM file with samtools."""
-    samtools = cfg["tools"].get("samtools", "samtools")
-    threads = cfg["project"].get("threads", 4)
-    run_cmd(
-        [samtools, "index", "-@", str(threads), str(bam)],
-        description=f"samtools index {bam.name}",
-    )
+    """Index a BAM file using pysam (Python) or samtools (fallback)."""
+    try:
+        import pysam
+        logger.info("  Indexing %s with pysam...", bam.name)
+        pysam.index(str(bam))
+    except ImportError:
+        samtools = cfg["tools"].get("samtools", "samtools")
+        threads = cfg["project"].get("threads", 4)
+        run_cmd(
+            [samtools, "index", "-@", str(threads), str(bam)],
+            description=f"samtools index {bam.name}",
+        )
 
 
 # ---------------------------------------------------------------------------

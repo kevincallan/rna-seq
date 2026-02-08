@@ -12,9 +12,11 @@ dependencies:
   - matplotlib
   - seaborn
   - scikit-learn
-  # Pure-Python DESeq2 (no R needed)
-  - pydeseq2>=0.4
-  # Bioinformatics tools
+  # Pure-Python bioinformatics
+  - pydeseq2>=0.4           # replaces R DESeq2
+  - pysam>=0.21             # replaces samtools
+  - htseq>=2.0              # replaces featureCounts
+  # Bioinformatics tools (compiled binaries -- only STAR is strictly required)
   - star
   - samtools
   - subread          # featureCounts

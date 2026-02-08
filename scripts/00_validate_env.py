@@ -86,8 +86,36 @@ def validate_tools(cfg: Dict[str, Any]) -> Dict[str, str]:
     methods = get_enabled_methods(cfg)
     versions: Dict[str, str] = {}
 
-    # Always-required tools
-    required = ["fastqc", "multiqc", "star", "samtools", "featurecounts", "bamcoverage"]
+    # Always-required compiled tools -- just the mapper
+    required = ["star"]
+
+    # These are Python packages but validate they're on PATH if used as CLI
+    # (multiqc, cutadapt, bamcoverage are pip-installable)
+    required.extend(["fastqc", "multiqc", "bamcoverage"])
+
+    # samtools only needed if pysam is not available
+    try:
+        import pysam
+        versions["pysam"] = pysam.__version__
+        logger.info("  %-16s OK  (v%s -- replaces samtools)", "pysam", pysam.__version__)
+    except ImportError:
+        required.append("samtools")
+
+    # featureCounts only needed if not using htseq backend
+    counting_backend = cfg.get("featurecounts", {}).get("backend", "featurecounts")
+    if counting_backend == "htseq":
+        try:
+            import HTSeq
+            versions["HTSeq"] = HTSeq.__version__
+            logger.info("  %-16s OK  (v%s -- replaces featureCounts)", "HTSeq", HTSeq.__version__)
+        except ImportError:
+            logger.error("  HTSeq not installed. Run: pip install HTSeq")
+            raise FileNotFoundError(
+                "Python package 'HTSeq' not found. "
+                "Install with: pip install HTSeq"
+            )
+    else:
+        required.append("featurecounts")
 
     # Add trimming tools for enabled methods
     if "cutadapt" in methods:
