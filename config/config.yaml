@@ -38,15 +38,32 @@ column_mapping:
 # -- Subset filters -----------------------------------------------------------
 # Only rows matching ALL filters are kept. Use empty string for "field is empty".
 # On exam day, change these to select your required subset.
+#
+# The GSE48519 dataset has a time-course:
+#   differentiation=""       -> day 0 (undifferentiated mESCs)
+#   differentiation="day 3"  -> early NPC differentiation
+#   differentiation="day 6"  -> late NPC differentiation
+#
+# Paper finding: Tet2-/- shows delayed gene induction at day 3 vs day 6.
+# Homework: WT vs Tet1 at day 3.
 subset_filters:
+  # Day 0 (undifferentiated) -- the practical 4 default
   default:
     "Assay Type": "RNA-Seq"
-    "differentiation": ""                  # empty = undifferentiated mESCs
-  day3_wt_vs_tet1:
+    "differentiation": ""
+
+  # Day 3 (early differentiation) -- HOMEWORK
+  day3:
     "Assay Type": "RNA-Seq"
     "differentiation": "day 3"
 
+  # Day 6 (late differentiation) -- compare with day 3
+  day6:
+    "Assay Type": "RNA-Seq"
+    "differentiation": "day 6"
+
 # Which subset to use (key from subset_filters above)
+# Change this to "day3" or "day6" for homework, or use --subset on CLI
 active_subset: "default"
 
 # -- Reference genome ---------------------------------------------------------
@@ -148,12 +165,18 @@ deseq2:
   fdr_threshold: 0.05
   lfc_threshold: 0.0           # log2 fold-change threshold (0 = no filter)
   # Use "wrapper" for DESeq2_wrapper (course server) or "rscript" for custom R
+  # On JupyterHub: use "rscript" (deseq2_run.R is included in pipeline)
+  # If DESeq2_wrapper is available: use "wrapper" (simpler, single contrast)
   method: "rscript"
   # Reference level for the condition factor (denominator in all contrasts)
   reference_level: "wt"
 
 # -- Contrasts / comparisons --------------------------------------------------
 # Each contrast compares numerator vs denominator (log2FC = num/denom).
+# These apply to whichever subset is active.
+# For day0 (undiff): both tet1 & tet2 vs wt
+# For day3 homework: tet1 vs wt (tet2 vs wt also interesting)
+# For day6: same contrasts, expect fewer DEGs than day3 (paper finding)
 comparisons:
   - name: "tet1_vs_wt"
     numerator: "tet1"
