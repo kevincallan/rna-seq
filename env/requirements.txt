@@ -1,0 +1,9 @@
+# Python dependencies (bioinformatics tools installed via conda/system)
+pyyaml>=6.0
+pandas>=1.5
+numpy>=1.23
+scipy>=1.9
+matplotlib>=3.6
+seaborn>=0.12
+markdown>=3.4
+pytest>=7.0

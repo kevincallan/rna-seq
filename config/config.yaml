@@ -1,0 +1,170 @@
+# =============================================================================
+# RNA-seq Analysis Pipeline Configuration
+# =============================================================================
+# Change this file on exam day. Everything the pipeline needs is here.
+# =============================================================================
+
+# -- Project metadata ---------------------------------------------------------
+project:
+  name: "GSE48519_5mC_oxidation"          # short project identifier
+  results_dir: "results"                   # top-level results folder
+  work_dir: "work"                         # intermediate files
+  logs_dir: "logs"                         # per-run log directory
+  threads: 4                               # default thread count for tools
+
+# -- Input data ---------------------------------------------------------------
+data:
+  metadata_csv: "/data/GSE48519/metadata.csv"   # SRA metadata CSV
+  fastq_dir: "/data/GSE48519"                   # directory with raw FASTQs
+  # Layout: "paired", "single", or "auto" (auto-detect from file presence)
+  layout: "paired"
+
+# -- Column mapping -----------------------------------------------------------
+# Map your metadata CSV columns to pipeline concepts.
+# Adjust these when using a different dataset.
+column_mapping:
+  run_id_col: "Run"                        # column containing SRR/ERR/DRR IDs
+  condition_cols:                           # columns used to build condition string
+    - "Genotype"
+  # Optional: map raw condition values to short safe names
+  condition_map:
+    "wild-type": "wt"
+    "tet1-/-": "tet1"
+    "tet2-/-": "tet2"
+  # How replicates are numbered within each condition
+  # "sorted_run_id" = sort Run IDs alphabetically, assign 1,2,3...
+  replicate_strategy: "sorted_run_id"
+
+# -- Subset filters -----------------------------------------------------------
+# Only rows matching ALL filters are kept. Use empty string for "field is empty".
+# On exam day, change these to select your required subset.
+subset_filters:
+  default:
+    "Assay Type": "RNA-Seq"
+    "differentiation": ""                  # empty = undifferentiated mESCs
+  day3_wt_vs_tet1:
+    "Assay Type": "RNA-Seq"
+    "differentiation": "day 3"
+
+# Which subset to use (key from subset_filters above)
+active_subset: "default"
+
+# -- Reference genome ---------------------------------------------------------
+references:
+  genome_index: "/data/indices/mm39/STAR"       # STAR genome directory
+  gtf: "/data/indices/mm39/mm39.gtf"            # gene annotation GTF
+  genome_fasta: "/data/indices/mm39/mm39.fa"     # genome FASTA (for some tools)
+
+# -- Tool paths ---------------------------------------------------------------
+# Leave as tool name to use $PATH, or give absolute path.
+tools:
+  fastqc: "fastqc"
+  multiqc: "multiqc"
+  cutadapt: "cutadapt"
+  fastp: "fastp"
+  trimmomatic: "trimmomatic"
+  star: "STAR"
+  samtools: "samtools"
+  featurecounts: "featureCounts"
+  bamcoverage: "bamCoverage"
+  rscript: "Rscript"
+
+# -- STAR mapping parameters --------------------------------------------------
+star_params:
+  outSAMtype: "BAM SortedByCoordinate"
+  readFilesCommand: "zcat"
+  outFilterMultimapNmax: 20
+  extra_args: ""                           # any additional STAR flags
+
+# -- Trimming methods ---------------------------------------------------------
+# Each method can be toggled on/off with 'enabled'.
+# The pipeline runs ALL enabled methods and compares results.
+trimming:
+  none:
+    enabled: true
+    # No parameters needed
+
+  cutadapt:
+    enabled: true
+    adapter_fwd: "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"   # Illumina TruSeq R1
+    adapter_rev: "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"   # Illumina TruSeq R2
+    quality: 20
+    min_length: 25
+    extra_args: ""
+
+  fastp:
+    enabled: true
+    quality: 20
+    min_length: 25
+    detect_adapter: true       # let fastp auto-detect adapters
+    extra_args: ""
+
+  trimmomatic:
+    enabled: false             # disabled by default; enable if available
+    adapter_file: "TruSeq3-PE-2.fa"
+    leading: 3
+    trailing: 3
+    slidingwindow: "4:20"
+    min_length: 25
+    extra_args: ""
+
+# -- featureCounts options ----------------------------------------------------
+# Multiple option sets can be defined and compared.
+featurecounts:
+  strandedness: 2              # 0=unstranded, 1=stranded, 2=reverse-stranded
+  feature_type: "exon"
+  attribute: "gene_id"
+  option_sets:
+    default:
+      label: "Default"
+      B: false                 # require both ends mapped
+      P: false                 # count fragments instead of reads
+      C: false                 # exclude chimeric fragments
+      Q: 0                     # minimum mapping quality
+      extra_args: ""
+    strict:
+      label: "Strict (B+P+C+Q10)"
+      B: true
+      P: true
+      C: true
+      Q: 10
+      extra_args: ""
+    stringent:
+      label: "Stringent (B+P+C+Q255)"
+      B: true
+      P: true
+      C: true
+      Q: 255
+      extra_args: ""
+
+# -- Matrix filtering ---------------------------------------------------------
+filtering:
+  # Drop genes where max count across all samples < threshold
+  # Default: number of samples (lecture rule of thumb: min 2 reads per sample)
+  min_max_count: "auto"        # "auto" = num_samples, or set integer
+
+# -- DESeq2 parameters --------------------------------------------------------
+deseq2:
+  fdr_threshold: 0.05
+  lfc_threshold: 0.0           # log2 fold-change threshold (0 = no filter)
+  # Use "wrapper" for DESeq2_wrapper (course server) or "rscript" for custom R
+  method: "rscript"
+  # Reference level for the condition factor (denominator in all contrasts)
+  reference_level: "wt"
+
+# -- Contrasts / comparisons --------------------------------------------------
+# Each contrast compares numerator vs denominator (log2FC = num/denom).
+comparisons:
+  - name: "tet1_vs_wt"
+    numerator: "tet1"
+    denominator: "wt"
+  - name: "tet2_vs_wt"
+    numerator: "tet2"
+    denominator: "wt"
+
+# -- BigWig parameters --------------------------------------------------------
+bigwig:
+  normalization: "CPM"
+  mapq_filter: 255             # STAR unique mappers MAPQ=255
+  bin_size: 50
+  use_deseq2_sizefactors: true # also produce DESeq2-scaled BigWigs if available

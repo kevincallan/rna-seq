@@ -1,0 +1,33 @@
+name: rnaseq_pipeline
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.10
+  - pyyaml
+  - pandas
+  - numpy
+  - scipy
+  - matplotlib
+  - seaborn
+  # Bioinformatics tools
+  - star
+  - samtools
+  - subread          # featureCounts
+  - fastqc
+  - multiqc
+  - cutadapt
+  - fastp
+  - trimmomatic
+  - deeptools        # bamCoverage
+  # R + DESeq2
+  - r-base>=4.2
+  - bioconductor-deseq2
+  - r-ggplot2
+  - r-pheatmap
+  # Testing
+  - pytest
+  # Optional
+  - pip:
+    - markdown
