@@ -281,7 +281,9 @@ Or pip (Python packages only -- bioinformatics tools must be installed separatel
 pip install -r env/requirements.txt
 ```
 
-Required external tools: STAR, samtools, featureCounts (subread), FastQC, MultiQC, cutadapt, fastp, bamCoverage (deeptools), R + DESeq2.
+Required external tools: STAR, samtools, featureCounts (subread), FastQC, MultiQC, cutadapt, fastp, bamCoverage (deeptools).
+
+R is **not required** when using the default `pydeseq2` backend (pure Python). If you prefer the R-based DESeq2, set `deseq2.method: "rscript"` in config and ensure R + Bioconductor DESeq2 are installed.
 
 ---
 
@@ -291,5 +293,6 @@ Required external tools: STAR, samtools, featureCounts (subread), FastQC, MultiQ
 - **Config-driven**: All parameters in `config/config.yaml`
 - **Deterministic**: Same inputs + config = same outputs (sorted Run IDs for replicate numbering)
 - **No hard-coded IDs**: Works with any dataset via config
+- **No R required**: Default `pydeseq2` backend is pure Python (works on Colab, JupyterHub, anywhere)
 - **Safe subprocess calls**: `subprocess.run([...], check=True)`, no `shell=True`
 - **Full provenance**: `run_manifest.json` captures config hash, tool versions, timestamps

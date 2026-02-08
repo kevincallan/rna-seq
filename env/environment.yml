@@ -11,6 +11,9 @@ dependencies:
   - scipy
   - matplotlib
   - seaborn
+  - scikit-learn
+  # Pure-Python DESeq2 (no R needed)
+  - pydeseq2>=0.4
   # Bioinformatics tools
   - star
   - samtools

@@ -97,9 +97,22 @@ def validate_tools(cfg: Dict[str, Any]) -> Dict[str, str]:
     if "trimmomatic" in methods:
         required.append("trimmomatic")
 
-    # R is needed for DESeq2
-    if cfg.get("deseq2", {}).get("method", "rscript") in ("rscript", "wrapper"):
+    # R is only needed for R-based DESeq2 backends
+    de_method = cfg.get("deseq2", {}).get("method", "pydeseq2")
+    if de_method == "rscript":
         required.append("rscript")
+    elif de_method == "pydeseq2":
+        # Verify pydeseq2 is importable (pure Python, no system tool)
+        try:
+            import pydeseq2
+            versions["pydeseq2"] = getattr(pydeseq2, "__version__", "installed")
+            logger.info("  %-16s OK  (v%s)", "pydeseq2", versions["pydeseq2"])
+        except ImportError:
+            logger.error("  pydeseq2 not installed. Run: pip install pydeseq2")
+            raise FileNotFoundError(
+                "Python package 'pydeseq2' not found. "
+                "Install with: pip install pydeseq2"
+            )
 
     for tool_key in required:
         exe = tools_cfg.get(tool_key, tool_key)

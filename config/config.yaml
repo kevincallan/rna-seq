@@ -164,10 +164,11 @@ filtering:
 deseq2:
   fdr_threshold: 0.05
   lfc_threshold: 0.0           # log2 fold-change threshold (0 = no filter)
-  # Use "wrapper" for DESeq2_wrapper (course server) or "rscript" for custom R
-  # On JupyterHub: use "rscript" (deseq2_run.R is included in pipeline)
-  # If DESeq2_wrapper is available: use "wrapper" (simpler, single contrast)
-  method: "rscript"
+  # Backend for differential expression. Options:
+  #   "pydeseq2"  - Pure Python, no R needed. Works everywhere. DEFAULT.
+  #   "rscript"   - Calls deseq2_run.R (needs R + Bioconductor DESeq2)
+  #   "wrapper"   - Calls DESeq2_wrapper (course server only)
+  method: "pydeseq2"
   # Reference level for the condition factor (denominator in all contrasts)
   reference_level: "wt"
 

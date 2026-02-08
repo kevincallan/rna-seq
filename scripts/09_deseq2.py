@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Step 09 -- Differential expression with DESeq2.
+Step 09 -- Differential expression analysis.
 
-Runs DESeq2 for each trimming method and each contrast defined in
-config.  Supports two backends:
+Supports three backends (set ``deseq2.method`` in config):
 
-  - ``rscript``: calls ``deseq2_run.R`` via Rscript (default)
-  - ``wrapper``: calls ``DESeq2_wrapper`` (available on course server)
+  - ``pydeseq2``: Pure Python -- no R needed. Works everywhere including
+    Colab, JupyterHub, any pip environment.  DEFAULT.
+  - ``rscript``: calls ``deseq2_run.R`` via Rscript (needs R + DESeq2).
+  - ``wrapper``: calls ``DESeq2_wrapper`` (available on course server).
 
-Produces DE results tables, PCA/MA plots, size factors, and DE summaries.
+All backends produce the same output files so downstream steps (BigWig
+size-factor scaling, compare_methods, report) work identically.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from typing import Any, Dict, List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.metadata import read_samples_tsv, write_sample_description
+from src.metadata import Sample, read_samples_tsv, write_sample_description
 from src.utils import (
     ensure_dirs,
     get_enabled_methods,
@@ -39,9 +41,263 @@ logger = logging.getLogger(__name__)
 DESEQ2_R_SCRIPT = Path(__file__).resolve().parent / "deseq2_run.R"
 
 
-# ---------------------------------------------------------------------------
-# DESeq2 via custom R script
-# ---------------------------------------------------------------------------
+# =========================================================================
+# Backend 1: PyDESeq2 (pure Python -- DEFAULT)
+# =========================================================================
+
+def run_pydeseq2(
+    count_matrix_path: Path,
+    samples: List[Sample],
+    contrast_name: str,
+    numerator: str,
+    denominator: str,
+    out_dir: Path,
+    cfg: Dict[str, Any],
+) -> None:
+    """Run differential expression using PyDESeq2 (pure Python).
+
+    Produces the same output files as the R backend:
+      - de_all.tsv, de_significant.tsv
+      - normalized_counts.tsv, size_factors.tsv
+      - pca.pdf, ma_plot.pdf
+      - session_info.txt
+    """
+    import numpy as np
+    import pandas as pd
+
+    ensure_dirs(out_dir)
+    deseq_cfg = cfg.get("deseq2", {})
+    fdr = deseq_cfg.get("fdr_threshold", 0.05)
+    lfc_threshold = deseq_cfg.get("lfc_threshold", 0.0)
+    ref_level = deseq_cfg.get("reference_level", denominator)
+
+    logger.info("  PyDESeq2: loading count matrix from %s", count_matrix_path)
+
+    # --- Load count matrix (genes x samples) -> transpose to (samples x genes)
+    raw = pd.read_csv(count_matrix_path, sep="\t", index_col=0)
+    # featureCounts produces genes-as-rows; PyDESeq2 wants samples-as-rows
+    counts_df = raw.T.copy()
+    # Ensure integer counts
+    counts_df = counts_df.round().astype(int)
+
+    logger.info("  Count matrix: %d samples x %d genes", *counts_df.shape)
+
+    # --- Build metadata DataFrame (index = sample names matching count columns)
+    meta_records = []
+    for s in samples:
+        meta_records.append({"sample": s.sample_name, "condition": s.condition})
+    metadata = pd.DataFrame(meta_records).set_index("sample")
+
+    # Keep only samples present in both count matrix and metadata
+    common = sorted(set(counts_df.index) & set(metadata.index))
+    if not common:
+        raise ValueError(
+            "No matching sample names between count matrix columns and "
+            "sample metadata. Check that featureCounts column headers match "
+            "sample names in samples.tsv."
+        )
+    counts_df = counts_df.loc[common]
+    metadata = metadata.loc[common]
+
+    # Filter to only conditions in the contrast
+    mask = metadata["condition"].isin([numerator, denominator])
+    counts_df = counts_df.loc[mask]
+    metadata = metadata.loc[mask]
+
+    logger.info("  Samples in contrast (%s vs %s): %d",
+                numerator, denominator, len(counts_df))
+
+    if len(counts_df) < 2:
+        raise ValueError(
+            f"Not enough samples for contrast {numerator} vs {denominator}"
+        )
+
+    # --- Import PyDESeq2 ------------------------------------------------
+    from pydeseq2.dds import DeseqDataSet
+    from pydeseq2.default_inference import DefaultInference
+    from pydeseq2.ds import DeseqStats
+
+    n_cpus = cfg["project"].get("threads", 4)
+    inference = DefaultInference(n_cpus=n_cpus)
+
+    # --- Fit model -------------------------------------------------------
+    logger.info("  Fitting DESeq2 model...")
+    dds = DeseqDataSet(
+        counts=counts_df,
+        metadata=metadata,
+        design="~condition",
+        refit_cooks=True,
+        inference=inference,
+        ref_level=["condition", ref_level],
+    )
+    dds.deseq2()
+
+    # --- Extract size factors --------------------------------------------
+    size_factors = dds.obs["size_factors"]
+    sf_df = pd.DataFrame({
+        "sample": size_factors.index,
+        "size_factor": size_factors.values,
+    })
+    sf_df.to_csv(out_dir / "size_factors.tsv", sep="\t", index=False)
+    # Also write to parent deseq2 dir for BigWig step
+    parent_sf = out_dir.parent / "size_factors.tsv"
+    sf_df.to_csv(parent_sf, sep="\t", index=False)
+
+    # --- Normalized counts -----------------------------------------------
+    norm_counts = pd.DataFrame(
+        dds.layers["normed_counts"],
+        index=dds.obs_names,
+        columns=dds.var_names,
+    ).T  # Back to genes-as-rows for compatibility
+    norm_counts.to_csv(out_dir / "normalized_counts.tsv", sep="\t")
+
+    # --- Statistical test ------------------------------------------------
+    logger.info("  Running Wald test: %s vs %s", numerator, denominator)
+    ds = DeseqStats(
+        dds,
+        contrast=["condition", numerator, denominator],
+        alpha=fdr,
+        inference=inference,
+    )
+    ds.summary()
+
+    results = ds.results_df.copy()
+    results = results.sort_values("padj", na_position="last")
+
+    # --- Write all results -----------------------------------------------
+    results.to_csv(out_dir / "de_all.tsv", sep="\t")
+
+    # Significant results
+    sig_mask = results["padj"].notna() & (results["padj"] < fdr)
+    if lfc_threshold > 0:
+        sig_mask = sig_mask & (results["log2FoldChange"].abs() > lfc_threshold)
+    sig = results.loc[sig_mask]
+    sig.to_csv(out_dir / "de_significant.tsv", sep="\t")
+
+    n_up = int((sig["log2FoldChange"] > 0).sum())
+    n_down = int((sig["log2FoldChange"] < 0).sum())
+    logger.info("  Significant DEGs (FDR < %s): %d (up=%d, down=%d)",
+                fdr, len(sig), n_up, n_down)
+
+    # --- PCA plot --------------------------------------------------------
+    _pydeseq2_pca_plot(dds, metadata, contrast_name, out_dir)
+
+    # --- MA plot ---------------------------------------------------------
+    _pydeseq2_ma_plot(results, contrast_name, fdr, out_dir)
+
+    # --- Session info ----------------------------------------------------
+    _pydeseq2_session_info(out_dir, contrast_name)
+
+    logger.info("  PyDESeq2 complete -> %s", out_dir)
+
+
+def _pydeseq2_pca_plot(dds, metadata, contrast_name: str, out_dir: Path) -> None:
+    """Generate a PCA plot from the variance-stabilised counts."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import pandas as pd
+        from sklearn.decomposition import PCA
+
+        # Use log2(normalized + 1) as a simple VST-like transform
+        norm = dds.layers["normed_counts"]
+        log_norm = np.log2(norm + 1)
+
+        pca = PCA(n_components=2)
+        pcs = pca.fit_transform(log_norm)
+        pct_var = pca.explained_variance_ratio_ * 100
+
+        pca_df = pd.DataFrame({
+            "PC1": pcs[:, 0],
+            "PC2": pcs[:, 1],
+            "condition": metadata["condition"].values,
+            "sample": metadata.index.values,
+        })
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        for cond, grp in pca_df.groupby("condition"):
+            ax.scatter(grp["PC1"], grp["PC2"], label=cond, s=60)
+            for _, row in grp.iterrows():
+                ax.annotate(row["sample"], (row["PC1"], row["PC2"]),
+                            fontsize=8, ha="left", va="bottom")
+
+        ax.set_xlabel(f"PC1: {pct_var[0]:.1f}% variance")
+        ax.set_ylabel(f"PC2: {pct_var[1]:.1f}% variance")
+        ax.set_title(f"PCA - {contrast_name}")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(out_dir / "pca.pdf")
+        plt.close(fig)
+        logger.info("  PCA plot saved.")
+    except Exception as exc:
+        logger.warning("  PCA plot failed: %s", exc)
+
+
+def _pydeseq2_ma_plot(results, contrast_name: str, fdr: float, out_dir: Path) -> None:
+    """Generate an MA plot."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+
+        mask_sig = results["padj"].notna() & (results["padj"] < fdr)
+        mask_ns = ~mask_sig
+
+        ax.scatter(
+            np.log10(results.loc[mask_ns, "baseMean"] + 1),
+            results.loc[mask_ns, "log2FoldChange"],
+            s=4, alpha=0.4, color="grey", label="NS",
+        )
+        ax.scatter(
+            np.log10(results.loc[mask_sig, "baseMean"] + 1),
+            results.loc[mask_sig, "log2FoldChange"],
+            s=6, alpha=0.6, color="red", label=f"FDR < {fdr}",
+        )
+        ax.axhline(0, color="black", linewidth=0.5)
+        ax.set_xlabel("log10(baseMean + 1)")
+        ax.set_ylabel("log2 Fold Change")
+        ax.set_title(f"MA Plot - {contrast_name}")
+        ax.legend(fontsize=8)
+        fig.tight_layout()
+        fig.savefig(out_dir / "ma_plot.pdf")
+        plt.close(fig)
+        logger.info("  MA plot saved.")
+    except Exception as exc:
+        logger.warning("  MA plot failed: %s", exc)
+
+
+def _pydeseq2_session_info(out_dir: Path, contrast_name: str) -> None:
+    """Write a Python equivalent of R's sessionInfo()."""
+    import platform
+    from datetime import datetime, timezone
+
+    lines = [
+        f"PyDESeq2 analysis: {contrast_name}",
+        f"Date: {datetime.now(timezone.utc).isoformat()}",
+        f"Python: {sys.version}",
+        f"Platform: {platform.platform()}",
+        "",
+    ]
+
+    for pkg in ["pydeseq2", "pandas", "numpy", "scipy", "sklearn",
+                "matplotlib", "anndata"]:
+        try:
+            mod = __import__(pkg)
+            lines.append(f"  {pkg}: {getattr(mod, '__version__', 'unknown')}")
+        except ImportError:
+            lines.append(f"  {pkg}: NOT INSTALLED")
+
+    (out_dir / "session_info.txt").write_text("\n".join(lines), encoding="utf-8")
+
+
+# =========================================================================
+# Backend 2: R script (deseq2_run.R)
+# =========================================================================
 
 def run_deseq2_rscript(
     count_matrix: Path,
@@ -76,12 +332,12 @@ def run_deseq2_rscript(
     if ref_level:
         cmd.extend(["--reference_level", ref_level])
 
-    run_cmd(cmd, description=f"DESeq2 {contrast_name}")
+    run_cmd(cmd, description=f"DESeq2 R {contrast_name}")
 
 
-# ---------------------------------------------------------------------------
-# DESeq2 via DESeq2_wrapper (course server)
-# ---------------------------------------------------------------------------
+# =========================================================================
+# Backend 3: DESeq2_wrapper (course server)
+# =========================================================================
 
 def run_deseq2_wrapper(
     count_matrix: Path,
@@ -96,12 +352,12 @@ def run_deseq2_wrapper(
     run_cmd(cmd, description="DESeq2_wrapper", cwd=out_dir)
 
 
-# ---------------------------------------------------------------------------
+# =========================================================================
 # Summary helpers
-# ---------------------------------------------------------------------------
+# =========================================================================
 
 def count_degs(results_path: Path, fdr: float = 0.05) -> Dict[str, int]:
-    """Count DEGs from a DESeq2 results TSV."""
+    """Count DEGs from a DESeq2/PyDESeq2 results TSV."""
     total = 0
     sig_up = 0
     sig_down = 0
@@ -112,24 +368,17 @@ def count_degs(results_path: Path, fdr: float = 0.05) -> Dict[str, int]:
     with open(results_path, encoding="utf-8") as fh:
         header = fh.readline().strip().split("\t")
         # Find padj and log2FoldChange column indices
-        try:
-            padj_idx = header.index("padj")
-        except ValueError:
-            # Try without header row name
-            padj_idx = -1
-            for i, h in enumerate(header):
-                if "padj" in h.lower():
-                    padj_idx = i
-                    break
+        padj_idx = -1
+        for i, h in enumerate(header):
+            if h.strip().lower() == "padj" or "padj" in h.lower():
+                padj_idx = i
+                break
 
-        try:
-            lfc_idx = header.index("log2FoldChange")
-        except ValueError:
-            lfc_idx = -1
-            for i, h in enumerate(header):
-                if "log2foldchange" in h.lower():
-                    lfc_idx = i
-                    break
+        lfc_idx = -1
+        for i, h in enumerate(header):
+            if "log2foldchange" in h.strip().lower():
+                lfc_idx = i
+                break
 
         if padj_idx < 0:
             return {"total_tested": 0, "sig_up": 0, "sig_down": 0, "sig_total": 0}
@@ -151,7 +400,7 @@ def count_degs(results_path: Path, fdr: float = 0.05) -> Dict[str, int]:
                         else:
                             sig_down += 1
                     except (ValueError, IndexError):
-                        sig_up += 1  # count as significant without direction
+                        sig_up += 1
                 else:
                     sig_up += 1
 
@@ -163,21 +412,23 @@ def count_degs(results_path: Path, fdr: float = 0.05) -> Dict[str, int]:
     }
 
 
-# ---------------------------------------------------------------------------
+# =========================================================================
 # Main
-# ---------------------------------------------------------------------------
+# =========================================================================
 
 def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None:
     """Execute step 09."""
     logger.info("=" * 60)
-    logger.info("STEP 09: DESeq2 differential expression")
+    logger.info("STEP 09: Differential expression analysis")
     logger.info("=" * 60)
 
     results_dir = Path(cfg["_results_dir"])
     deseq_cfg = cfg.get("deseq2", {})
-    method_backend = deseq_cfg.get("method", "rscript")
+    method_backend = deseq_cfg.get("method", "pydeseq2")
     fdr = deseq_cfg.get("fdr_threshold", 0.05)
     comparisons = cfg.get("comparisons", [])
+
+    logger.info("Backend: %s", method_backend)
 
     samples_tsv = Path(cfg.get("_samples_tsv", results_dir / "samples.tsv"))
     samples = read_samples_tsv(samples_tsv)
@@ -190,7 +441,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     all_de_stats: List[Dict[str, Any]] = []
 
     for method in methods:
-        logger.info("--- DESeq2 for method: %s ---", method)
+        logger.info("--- DE for trimming method: %s ---", method)
         fc_dir = results_dir / method / "featurecounts"
         de_dir = results_dir / method / "deseq2"
         ensure_dirs(de_dir)
@@ -201,7 +452,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
             logger.error("Count matrix not found: %s", count_matrix)
             continue
 
-        # Write sample description for this method
+        # Write sample description for R backends
         sample_desc = de_dir / "sample_description.txt"
         write_sample_description(samples, sample_desc)
 
@@ -209,8 +460,6 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
             # DESeq2_wrapper runs a single default contrast
             logger.info("  Running DESeq2_wrapper...")
             run_deseq2_wrapper(count_matrix, sample_desc, de_dir, cfg)
-
-            # Try to parse results
             de_all = de_dir / "DESeq2.de_all.tsv"
             if de_all.exists():
                 stats = count_degs(de_all, fdr)
@@ -218,33 +467,54 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                 stats["contrast"] = "auto"
                 all_de_stats.append(stats)
 
-        else:
+        elif method_backend == "rscript":
             # Custom R script -- run each contrast
             for contrast in comparisons:
                 cname = contrast["name"]
                 num = contrast["numerator"]
                 den = contrast["denominator"]
                 contrast_dir = de_dir / cname
-
                 logger.info("  Contrast: %s (%s vs %s)", cname, num, den)
                 run_deseq2_rscript(
                     count_matrix, sample_desc,
-                    cname, num, den,
-                    contrast_dir, cfg,
+                    cname, num, den, contrast_dir, cfg,
                 )
-
-                # Parse DE results
                 de_all = contrast_dir / "de_all.tsv"
                 stats = count_degs(de_all, fdr)
                 stats["method"] = method
                 stats["contrast"] = cname
                 all_de_stats.append(stats)
 
+        elif method_backend == "pydeseq2":
+            # Pure Python -- no R required
+            for contrast in comparisons:
+                cname = contrast["name"]
+                num = contrast["numerator"]
+                den = contrast["denominator"]
+                contrast_dir = de_dir / cname
+                logger.info("  Contrast: %s (%s vs %s)", cname, num, den)
+                run_pydeseq2(
+                    count_matrix, samples,
+                    cname, num, den, contrast_dir, cfg,
+                )
+                de_all = contrast_dir / "de_all.tsv"
+                stats = count_degs(de_all, fdr)
+                stats["method"] = method
+                stats["contrast"] = cname
+                all_de_stats.append(stats)
+
+        else:
+            raise ValueError(
+                f"Unknown deseq2.method: '{method_backend}'. "
+                "Use 'pydeseq2', 'rscript', or 'wrapper'."
+            )
+
     # Write DE summary
     de_summary_path = results_dir / "de_summary.tsv"
     if all_de_stats:
         with open(de_summary_path, "w", newline="", encoding="utf-8") as fh:
-            fields = ["method", "contrast", "total_tested", "sig_up", "sig_down", "sig_total"]
+            fields = ["method", "contrast", "total_tested",
+                      "sig_up", "sig_down", "sig_total"]
             writer = csv.DictWriter(fh, fieldnames=fields, delimiter="\t",
                                     extrasaction="ignore")
             writer.writeheader()
@@ -258,7 +528,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Step 09: DESeq2")
+    parser = argparse.ArgumentParser(description="Step 09: Differential expression")
     parser.add_argument("--config", required=True)
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--methods", nargs="*", default=None)
