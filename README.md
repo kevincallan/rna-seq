@@ -287,6 +287,51 @@ R is **not required** when using the default `pydeseq2` backend (pure Python). I
 
 ---
 
+---
+
+## Running on Google Colab
+
+The pipeline can run on Colab using a chr19-only reference and test data (see `scripts/setup_colab.sh`). Colab runtimes are **ephemeral**: if the instance disconnects or crashes, the VM is recycled and you lose the clone, references, and any outputs that were only on the VM.
+
+### GPU vs CPU
+
+This pipeline is **CPU- and RAM-bound** (STAR, FastQC, HTSeq, PyDESeq2). **A GPU does not speed it up.** Choosing a GPU runtime only makes sense if Colab gives you a high-RAM GPU machine (e.g. T4) and you want the extra RAM to reduce out-of-memory crashes—not for GPU compute.
+
+### If Colab Keeps Crashing
+
+- **Run elsewhere** for reliability:
+  - **Locally** (Mac/Linux): use `config/config.yaml` with your paths; run the same commands. More RAM and no timeout.
+  - **University or lab HPC**: clone the repo, run as a batch job; no session time limit.
+  - **Cloud VM** (GCP, AWS, etc.): spin up a VM with enough RAM (e.g. 16–32 GB), clone the repo, run the pipeline; you pay for compute time but avoid Colab limits.
+- **Reduce load on Colab**: the Colab config already uses `threads: 2` and chr19-only. You can run in smaller chunks (e.g. steps 0–4, then 5–11 in a new session) and save outputs to Drive between runs.
+
+### Persisting Your Work on Colab
+
+1. **Clone the repo to Google Drive** so the code survives a disconnect:
+   ```python
+   from google.colab import drive
+   drive.mount('/content/drive')
+   # Clone into Drive (slower I/O, but persists)
+   %cd /content/drive/MyDrive
+   !git clone https://github.com/kevincallan/rna-seq.git
+   %cd rna-seq
+   !bash scripts/setup_colab.sh
+   ```
+   Use paths under `/content/drive/MyDrive/rna-seq` and adjust the Colab config so `results_dir` and `work_dir` point under Drive if you want outputs to persist too (see `scripts/setup_colab.sh` for an optional Drive layout).
+
+2. **Resume after a crash**: the pipeline has no automatic checkpoint. Re-run with the **same** `--run-id` and only the steps that did not complete:
+   ```bash
+   python scripts/run_pipeline.py --config config/config_colab.yaml --run-id <same_run_id> run --steps 3 4 5 6 7 8 9 10 11
+   ```
+   So note your `run_id` (e.g. from the first run’s output or from `results/`) and reuse it when resuming.
+
+3. **Back up results to Drive** after a run (if you didn’t run from Drive):
+   ```bash
+   cp -r results /content/drive/MyDrive/rna-seq_results_backup
+   ```
+
+---
+
 ## Design Principles
 
 - **One file per step**: Each script is independently runnable

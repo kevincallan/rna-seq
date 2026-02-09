@@ -2,14 +2,24 @@
 # =============================================================================
 # Colab Setup Script
 # =============================================================================
-# Run this ONCE after cloning the repo on Google Colab:
+# Run this ONCE after cloning the repo on Google Colab.
 #
+# Option A - Ephemeral (lost on disconnect):
 #   !git clone https://github.com/kevincallan/rna-seq.git
 #   %cd rna-seq
 #   !bash scripts/setup_colab.sh
 #
-# This installs all dependencies and downloads a small test dataset.
-# Total time: ~5-10 minutes.  Disk: ~5 GB for genome index + test FASTQs.
+# Option B - Persist repo and outputs on Google Drive (survives disconnect):
+#   from google.colab import drive
+#   drive.mount('/content/drive')
+#   %cd /content/drive/MyDrive
+#   !git clone https://github.com/kevincallan/rna-seq.git
+#   %cd rna-seq
+#   !bash scripts/setup_colab.sh
+#   # References and data will be under /content/... (re-run setup after reconnect).
+#   # To save results to Drive after a run: cp -r results /content/drive/MyDrive/rna-seq_results
+#
+# Total time: ~5-10 min.  Disk: ~5 GB for genome index + test FASTQs.
 # =============================================================================
 
 set -e
@@ -165,11 +175,12 @@ METADATA
 echo "    Metadata CSV created at $METADIR/metadata.csv"
 
 # -----------------------------------------------------------------
-# 6. Write Colab config
+# 6. Write Colab config (in repo so it works when repo is on Drive)
 # -----------------------------------------------------------------
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 echo ""
 echo ">>> Writing Colab config..."
-cat > /content/rna-seq/config/config_colab.yaml << 'COLABCFG'
+cat > "$REPO_ROOT/config/config_colab.yaml" << 'COLABCFG'
 # Config for Google Colab -- paths adjusted for /content/
 project:
   name: "GSE48519_colab"
@@ -276,7 +287,7 @@ bigwig:
   use_deseq2_sizefactors: true
 COLABCFG
 
-echo "    Colab config at /content/rna-seq/config/config_colab.yaml"
+echo "    Colab config at $REPO_ROOT/config/config_colab.yaml"
 
 # -----------------------------------------------------------------
 # 7. Verify setup
@@ -291,10 +302,10 @@ echo "  STAR:             $(which STAR 2>/dev/null || echo 'CHECK MANUALLY')"
 echo "  Reference:        $REFDIR/STAR/"
 echo "  FASTQs:           $FQDIR/"
 echo "  Metadata:         $FQDIR/metadata.csv"
-echo "  Config:           /content/rna-seq/config/config_colab.yaml"
+echo "  Config:           $REPO_ROOT/config/config_colab.yaml"
 echo ""
 echo "  To run the pipeline:"
-echo "    cd /content/rna-seq"
+echo "    cd $REPO_ROOT"
 echo "    python scripts/run_pipeline.py --config config/config_colab.yaml run"
 echo ""
 echo "  To run just QC + mapping (faster test):"
