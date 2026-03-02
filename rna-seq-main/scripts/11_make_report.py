@@ -108,6 +108,11 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     # === Trimming summary ===================================================
     rpt.h2("Trimming Summary")
     rpt.paragraph(f"Methods compared: {', '.join(methods)}")
+    if methods == ["none"]:
+        rpt.paragraph(
+            "Only the `none` baseline was run: reads were passed through "
+            "without adapter/quality trimming."
+        )
     trim_summary = results_dir / "trimming_summary.tsv"
     if trim_summary.exists():
         rpt.table_from_tsv(trim_summary)

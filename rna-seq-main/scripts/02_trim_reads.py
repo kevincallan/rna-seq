@@ -60,9 +60,11 @@ def _trim_none(sample: Sample, work_dir: Path) -> Dict[str, Any]:
             dst.unlink()
         os.symlink(src.resolve(), dst)
 
-    metrics["reads_in"] = "N/A"
-    metrics["reads_out"] = "N/A"
-    metrics["bases_trimmed"] = "N/A"
+    # "none" is a baseline method: no trimming performed.
+    # Keep fields explicit so report tables are informative, not blank-ish.
+    metrics["reads_in"] = "unchanged"
+    metrics["reads_out"] = "unchanged"
+    metrics["bases_trimmed"] = "0"
     return metrics
 
 
