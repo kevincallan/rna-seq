@@ -110,7 +110,7 @@ trimming:
     extra_args: ""
 
   fastp:
-    enabled: true
+    enabled: false
     quality: 20
     min_length: 25
     detect_adapter: true       # let fastp auto-detect adapters

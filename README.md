@@ -1,21 +1,387 @@
 # RNA-seq Analysis Pipeline
 
-A complete, reproducible RNA-seq analysis pipeline designed for exam-day use. Runs as standalone Python scripts (one per stage), driven entirely by `config/config.yaml` + a metadata CSV. Supports comparing multiple trimming methodologies side-by-side.
+A config-driven, end-to-end RNA-seq pipeline for differential expression analysis. Designed for exam-day use on the university JupyterHub server. Produces QC reports, count matrices, DE results with statistical tables, publication-quality figures, and gene lists ready for functional enrichment analysis.
 
 ---
 
-## Quick Start
+## Exam Day Quick Start
 
 ```bash
 cd pipeline/
 
-# 1. Edit config/config.yaml with your paths
-# 2. Run the full pipeline:
-python scripts/run_pipeline.py --config config/config.yaml run
-
-# Or use Make:
-make run
+# One command -- change only the dataset ID:
+./py scripts/run_pipeline.py --dataset GSEXXXXX run
 ```
+
+`./py` is a wrapper that ensures the correct JupyterHub interpreter (`/opt/jupyterhub/bin/python3`) is used. The pipeline will:
+
+1. Verify the interpreter and all required packages
+2. Derive data paths from `--dataset` (FASTQs and metadata in `/data/GSEXXXXX/`)
+3. Validate that files exist and FASTQ filenames match metadata run IDs
+4. Run all 12 steps: QC, trimming, mapping, counting, filtering, DE analysis, plots, and report generation
+
+On exam day, only the dataset accession changes. Everything else (references, parameters, tool paths) is already configured.
+
+---
+
+## What the Pipeline Does
+
+This pipeline takes raw RNA-seq FASTQ files and produces a complete differential expression analysis:
+
+```
+Raw FASTQs
+  --> Quality control (FastQC / MultiQC)
+  --> Adapter trimming (cutadapt, with untrimmed baseline)
+  --> Read mapping to reference genome (STAR)
+  --> Read counting per gene (featureCounts / HTSeq)
+  --> Low-expression gene filtering
+  --> Differential expression analysis (PyDESeq2)
+  --> Figures: PCA, MA plot, volcano plot
+  --> Gene lists for functional enrichment
+  --> Method comparison report
+  --> Final summary report
+```
+
+All steps are automated and config-driven. The pipeline compares multiple trimming approaches and featureCounts parameter sets side-by-side, which demonstrates how preprocessing choices affect downstream results.
+
+---
+
+## Pipeline Stages
+
+| Step | Script | What it does | Key outputs |
+|------|--------|-------------|-------------|
+| 0 | `00_validate_env.py` | Checks all tools and paths exist, creates output directories | `run_manifest.json` |
+| 1 | `01_prepare_samples.py` | Parses metadata CSV, applies subset filters, creates FASTQ symlinks with standardised names | `samples.tsv`, `sample_description.txt` |
+| 2 | `02_trim_reads.py` | Runs each enabled trimming method (none, cutadapt) on all samples | Trimmed FASTQs, `trimming_summary.tsv` |
+| 3 | `03_qc_fastqc.py` | Runs FastQC on raw and trimmed reads | FastQC HTML reports per sample |
+| 4 | `04_multiqc.py` | Aggregates FastQC reports into MultiQC summaries | MultiQC HTML reports |
+| 5 | `05_map_star.py` | Aligns reads to the reference genome using STAR, indexes BAMs | Sorted BAMs, `mapping_summary.tsv` |
+| 6 | `06_bigwig.py` | Generates coverage tracks (CPM and DESeq2-scaled) | BigWig files for genome browser |
+| 7 | `07_featurecounts.py` | Counts reads per gene using multiple parameter sets | Count matrices per option set |
+| 8 | `08_filter_matrix.py` | Removes lowly-expressed genes | Filtered count matrices, `filtering_summary.tsv` |
+| 9 | `09_deseq2.py` | Runs PyDESeq2 for each contrast: normalisation, Wald test, plots | DE tables, PCA, MA, volcano plots, gene lists |
+| 10 | `10_compare_methods.py` | Compares trimming methods: mapping rates, DEG overlap, correlations | `method_comparison.md` |
+| 11 | `11_make_report.py` | Generates a combined Markdown + HTML report | `report.md`, `report.html` |
+
+---
+
+## Command-Line Options
+
+### Data pointer (change on exam day)
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--dataset GSEXXXXX` | *(none)* | Dataset accession. Derives `fastq_dir = /data/GSEXXXXX` and `metadata_csv = /data/GSEXXXXX/metadata.csv` |
+| `--data-root /path` | `/data` | Root directory where datasets and indices live |
+| `--metadata /path/file.csv` | *(derived)* | Override metadata CSV path if not in the standard location |
+| `--species mouse\|human` | *(from config)* | Optional. Derives reference genome paths (`/data/indices/mm39/` or `/data/indices/hg38/`). Only needed if switching organism. |
+| `--outdir path` | `results/<run_id>` | Override output directory |
+| `--strict` | off | Fail if any metadata run IDs have no matching FASTQ files |
+
+### Run control
+
+| Flag | Purpose |
+|------|---------|
+| `--config path` | Path to config YAML (default: `config/config.yaml`) |
+| `--run-id ID` | Override the auto-generated run ID |
+| `run --steps 0 1 2 5` | Run only specific steps |
+| `run --methods none cutadapt` | Override which trimming methods to run |
+| `run --subset day3` | Use a specific subset filter from config |
+| `run --threads N` | Override thread count |
+
+### Examples
+
+```bash
+# Full pipeline with dataset pointer:
+./py scripts/run_pipeline.py --dataset GSE48519 run
+
+# Just QC steps:
+./py scripts/run_pipeline.py --dataset GSE48519 run --steps 0 1 2 3 4
+
+# Run through mapping only:
+./py scripts/run_pipeline.py --dataset GSE48519 run --steps 0 1 2 3 4 5
+
+# Only the 'none' trimming method (fastest):
+./py scripts/run_pipeline.py --dataset GSE48519 run --methods none
+
+# Use Make shortcuts:
+make run
+make qc       # steps 0-4
+make map      # steps 0-5
+make count    # steps 0-8
+make de       # steps 0-9
+```
+
+---
+
+## Configuration Parameters
+
+All parameters live in `config/config.yaml`. Key sections you may want to adjust:
+
+### Column mapping
+
+Maps your metadata CSV columns to pipeline concepts:
+
+```yaml
+column_mapping:
+  run_id_col: "Run"                    # Column with SRR/ERR IDs
+  condition_cols: ["Genotype"]         # Column(s) defining experimental conditions
+  condition_map:                       # Map raw values to short names
+    "wild-type": "wt"
+    "tet1-/-": "tet1"
+```
+
+### Subset filters
+
+Select which samples to analyse (e.g., only day 3 differentiation):
+
+```yaml
+subset_filters:
+  default:
+    "Assay Type": "RNA-Seq"
+    "differentiation": ""
+  day3:
+    "Assay Type": "RNA-Seq"
+    "differentiation": "day 3"
+active_subset: "default"
+```
+
+### Comparisons (contrasts)
+
+Define which conditions to compare:
+
+```yaml
+comparisons:
+  - name: "tet1_vs_wt"
+    numerator: "tet1"
+    denominator: "wt"
+deseq2:
+  reference_level: "wt"       # Control condition (denominator)
+  fdr_threshold: 0.05          # Significance threshold
+  lfc_threshold: 0.0           # log2FC cutoff (0 = no filter)
+```
+
+### featureCounts option sets
+
+Three counting stringency levels run in parallel to show parameter effects:
+
+```yaml
+featurecounts:
+  backend: "featurecounts"     # or "htseq"
+  option_sets:
+    default:                   # No special flags
+      B: false
+      P: false
+      C: false
+      Q: 0
+    strict:                    # Both ends mapped, proper pairs, no chimeras
+      B: true
+      P: true
+      C: true
+      Q: 10
+    stringent:                 # Unique mappers only (MAPQ=255)
+      B: true
+      P: true
+      C: true
+      Q: 255
+```
+
+### Trimming methods
+
+Toggle trimming approaches. Each enabled method produces independent downstream results:
+
+```yaml
+trimming:
+  none:
+    enabled: true              # Untrimmed baseline
+  cutadapt:
+    enabled: true              # Adapter + quality trimming
+    quality: 20
+    min_length: 25
+```
+
+---
+
+## Output Structure and Key Files
+
+```
+results/<run_id>/
+  run_manifest.json                          # Reproducibility: config hash, tool versions
+  samples.tsv                                # Design table (sample -> condition -> replicate)
+  mapping_summary.tsv                        # STAR mapping rates per sample/method
+  featurecounts_summary.tsv                  # Assigned reads per option set
+  filtering_summary.tsv                      # Genes before/after filtering
+  de_summary.tsv                             # DEG counts per method/contrast
+  reports/
+    report.md / report.html                  # Combined final report
+    method_comparison.md                     # Trimming method comparison
+    multiqc_raw/multiqc_report.html          # Raw reads QC
+    multiqc_<method>/multiqc_report.html     # Per-method QC
+  <method>/                                  # e.g. none/, cutadapt/
+    star/<sample>_Aligned.sortedByCoord.out.bam
+    featurecounts/count_matrix_<set>.tsv     # Raw count matrices
+    featurecounts/clean_matrix_<set>.tsv     # Filtered count matrices
+    deseq2/<contrast>/
+      de_all.tsv                             # All genes: log2FC, pvalue, padj
+      de_significant.tsv                     # FDR-significant genes only
+      normalized_counts.tsv                  # DESeq2-normalised count matrix
+      size_factors.tsv                       # DESeq2 size factors
+      top_genes_for_enrichment.txt           # Gene IDs for enrichment tools
+      pca.pdf                                # PCA plot
+      ma_plot.pdf                            # MA plot
+      volcano.pdf                            # Volcano plot
+      session_info.txt                       # Package versions
+```
+
+---
+
+## Interpreting the Results
+
+### DE results table (`de_all.tsv`, `de_significant.tsv`)
+
+Each row is a gene. Key columns:
+
+| Column | Meaning |
+|--------|---------|
+| `baseMean` | Average normalised expression across all samples |
+| `log2FoldChange` | Effect size: positive = upregulated in numerator, negative = downregulated |
+| `lfcSE` | Standard error of the log2FC estimate |
+| `stat` | Wald test statistic |
+| `pvalue` | Raw p-value from the Wald test |
+| `padj` | Benjamini-Hochberg adjusted p-value (FDR). **Use this for significance.** |
+
+A gene is significantly DE when `padj < 0.05` (configurable via `deseq2.fdr_threshold`).
+
+### PCA plot (`pca.pdf`)
+
+Shows the first two principal components of variance-stabilised counts. Samples should cluster by condition. If they don't, check for batch effects, mislabelling, or outlier samples. The percentage on each axis indicates how much variance that component explains.
+
+### MA plot (`ma_plot.pdf`)
+
+Plots log2 fold change (y) against mean expression (x). Red points are significant genes. Most genes cluster near zero fold change. The spread of red points shows the magnitude and distribution of differential expression.
+
+### Volcano plot (`volcano.pdf`)
+
+Plots log2 fold change (x) against statistical significance as -log10(padj) (y). Points in the upper corners are both highly significant and have large effect sizes -- these are the most biologically interesting candidates. The dashed horizontal line marks the FDR threshold.
+
+### Method comparison (`method_comparison.md`)
+
+Compares trimming methods on:
+- **Mapping rates**: Higher is generally better, but very high rates may indicate reference contamination
+- **Assigned reads**: Fraction of mapped reads that overlap annotated features
+- **Count correlations**: Pearson r between normalised counts from different methods (expect > 0.99)
+- **DEG overlap**: Jaccard similarity of significant gene sets. High overlap = robust results
+- **Method-sensitive genes**: Genes whose significance flips between methods -- these findings are fragile and should be reported cautiously
+
+### What the results mean biologically
+
+- **Large number of DEGs** (hundreds-thousands): Strong transcriptomic response to the condition
+- **Few DEGs**: Subtle or no effect; or insufficient replicates/sequencing depth
+- **Asymmetric up/down**: Condition may activate or repress specific pathways
+- **PCA separation**: Conditions have distinct expression profiles
+- **High method agreement**: Results are robust to preprocessing choices
+
+---
+
+## Functional Enrichment Analysis
+
+The pipeline exports `top_genes_for_enrichment.txt` -- a plain-text list of significant gene IDs (one per line), ready to paste into external enrichment tools.
+
+### Recommended tools
+
+1. **g:Profiler** (https://biit.cs.ut.ee/gprofiler/gost)
+   - Paste gene list, select organism
+   - Returns enriched GO terms (Biological Process, Molecular Function, Cellular Component), KEGG pathways, Reactome
+   - Produces publication-quality plots
+
+2. **Enrichr** (https://maayanlab.cloud/Enrichr/)
+   - Paste gene list
+   - Searches many gene-set libraries (GO, KEGG, WikiPathways, transcription factor targets, etc.)
+   - Combined score ranks enrichment by significance and effect size
+
+3. **iDEP** (https://bioinformatics.sdstate.edu/idep/)
+   - Upload the full count matrix (`normalized_counts.tsv`) or DE table (`de_all.tsv`)
+   - Provides PCA, clustering, enrichment, and pathway analysis in one interface
+   - Useful for exploratory analysis beyond what this pipeline produces
+
+### Enrichment workflow
+
+1. Locate `top_genes_for_enrichment.txt` in `results/<run_id>/<method>/deseq2/<contrast>/`
+2. Open g:Profiler or Enrichr in a browser
+3. Paste the gene list
+4. Select the correct organism (e.g., *Mus musculus* for mouse)
+5. Run the analysis and note the top enriched terms
+6. Include 1-2 key findings in your report (e.g., "Upregulated genes were enriched for neuronal differentiation pathways (GO:0030182, padj = 2.3e-8)")
+
+### Interpreting enrichment results
+
+- **GO Biological Process**: What biological processes are affected? (e.g., "cell differentiation", "immune response")
+- **KEGG/Reactome pathways**: Which specific signalling or metabolic pathways are perturbed?
+- **Significance**: Use adjusted p-values. Many enriched terms may be redundant (parent-child GO relationships)
+- **Compare with published results**: Do your enriched pathways match the original paper's findings? Concordance strengthens your analysis; discrepancies should be discussed
+
+---
+
+## Parameter Effects to Explore (Advanced)
+
+The pipeline is designed to demonstrate how parameter choices affect RNA-seq results. These are good discussion points for the report:
+
+### 1. Trimming vs no trimming
+
+Compare `none/` and `cutadapt/` results:
+- Does trimming change the mapping rate? (Check `mapping_summary.tsv`)
+- Does it change which genes are called DE? (Check `method_comparison.md`)
+- Implication: Adapter contamination inflates multi-mapping; trimming improves specificity
+
+### 2. featureCounts stringency
+
+Compare the three option sets (default, strict, stringent):
+- `strict` requires both mates mapped and proper pairing -- removes ambiguous fragments
+- `stringent` (Q=255) keeps only uniquely mapped reads -- most conservative
+- Implication: Stricter counting reduces noise but may lose signal for genes in repetitive regions
+
+### 3. FDR threshold sensitivity
+
+The default threshold is 0.05. Discuss what happens at 0.01 or 0.1:
+- More stringent = fewer DEGs but higher confidence
+- Less stringent = more DEGs but more false positives
+- This can be explored post-hoc from `de_all.tsv` without re-running the pipeline
+
+### 4. Replicate count
+
+Using more than the minimum 2 replicates increases statistical power. The pipeline automatically uses all replicates matching the subset filter. More replicates = narrower confidence intervals = more DEGs detected.
+
+---
+
+## Exam-Day Workflow
+
+1. **Receive** your dataset ID (e.g., `GSE12345`), subset assignment, and metadata CSV
+2. **Edit** `config/config.yaml`:
+   - Update `column_mapping` if the metadata CSV has different column names
+   - Update `condition_map` to map raw condition values to short names
+   - Update `subset_filters` to define your assigned subset
+   - Update `comparisons` to define your contrast (numerator vs denominator)
+   - Update `deseq2.reference_level` to set the control condition
+3. **Run**:
+
+```bash
+cd pipeline/
+./py scripts/run_pipeline.py --dataset GSE12345 run
+```
+
+4. **Collect outputs** from `results/<run_id>/`:
+   - Figures for report: `pca.pdf`, `volcano.pdf`, `ma_plot.pdf` (choose best 4)
+   - Tables: `de_significant.tsv` (top genes), `mapping_summary.tsv` (QC stats)
+   - Gene list: `top_genes_for_enrichment.txt` --> paste into g:Profiler
+5. **Run enrichment** analysis in browser (g:Profiler / Enrichr)
+6. **Write** 800-1200 word report with 4 figures
+
+### Report structure suggestion
+
+1. **Introduction**: Dataset description, biological question, experimental design
+2. **Methods**: Pipeline overview (QC, mapping, counting, DE method, parameters used)
+3. **Results**: Key figures (PCA showing sample grouping, volcano plot showing DE landscape), top DE genes table, enrichment findings
+4. **Discussion**: Compare with published findings, discuss parameter effects, note limitations
 
 ---
 
@@ -23,321 +389,60 @@ make run
 
 ```
 pipeline/
-  README.md                  # This file
-  Makefile                   # Convenience targets
-  .gitignore
+  py                           # Interpreter wrapper (./py ensures correct Python)
+  Makefile                     # Convenience targets (make run, make qc, etc.)
+  README.md                    # This file
   config/
-    config.yaml              # ALL configuration lives here
+    config.yaml                # ALL configuration
   env/
-    environment.yml          # Conda environment
-    requirements.txt         # pip requirements
+    environment.yml            # Conda environment spec
+    requirements.txt           # pip requirements
   src/
-    __init__.py
-    utils.py                 # Logging, subprocess, hashing, config loader
-    metadata.py              # CSV parsing, design table, symlinks
-    reporting.py             # Markdown/HTML report builder
+    utils.py                   # Logging, subprocess, config loading
+    metadata.py                # CSV parsing, design table, symlinks
+    reporting.py               # Markdown/HTML report builder
   scripts/
-    run_pipeline.py          # Orchestrator (run full or individual steps)
-    00_validate_env.py       # Check tools, paths, create directories
-    01_prepare_samples.py    # Parse metadata, create symlinks, samples.tsv
-    02_trim_reads.py         # Trim with none/cutadapt/fastp/trimmomatic
-    03_qc_fastqc.py          # FastQC on raw + trimmed reads
-    04_multiqc.py            # MultiQC reports per method
-    05_map_star.py           # STAR mapping per method
-    06_bigwig.py             # BigWig (CPM + DESeq2-scaled) per method
-    07_featurecounts.py      # featureCounts with multiple option sets
-    08_filter_matrix.py      # Filter low-expression genes
-    09_deseq2.py             # DESeq2 per method/contrast
-    10_compare_methods.py    # Cross-method comparison report
-    11_make_report.py        # Final Markdown + HTML report
-    deseq2_run.R             # Standalone R script for DESeq2
-    download_sra.py          # Optional: download FASTQs from SRA
+    run_pipeline.py            # Orchestrator
+    00_validate_env.py         # Environment validation
+    01_prepare_samples.py      # Metadata parsing + sample prep
+    02_trim_reads.py           # Read trimming
+    03_qc_fastqc.py            # FastQC
+    04_multiqc.py              # MultiQC
+    05_map_star.py             # STAR alignment
+    06_bigwig.py               # Coverage tracks
+    07_featurecounts.py        # Read counting
+    08_filter_matrix.py        # Low-expression filtering
+    09_deseq2.py               # Differential expression + plots
+    10_compare_methods.py      # Method comparison
+    11_make_report.py          # Report generation
+    deseq2_run.R               # R DESeq2 backend (optional)
   tests/
-    test_metadata.py         # Tests for metadata parsing
-    test_naming.py           # Tests for naming conventions
-```
-
----
-
-## Exam-Day Checklist
-
-### What to change in `config/config.yaml`:
-
-1. **`data.metadata_csv`** -- path to the new metadata CSV
-2. **`data.fastq_dir`** -- path to the directory with FASTQs
-3. **`column_mapping.run_id_col`** -- column name with Run IDs (e.g., `Run`)
-4. **`column_mapping.condition_cols`** -- columns to build condition strings
-5. **`column_mapping.condition_map`** -- map raw values to short names
-6. **`subset_filters`** -- define your subset (e.g., "day 3 WT vs Tet1")
-7. **`active_subset`** -- select which subset to use
-8. **`references`** -- genome index, GTF, FASTA paths
-9. **`comparisons`** -- which contrasts to test (numerator vs denominator)
-10. **`deseq2.reference_level`** -- the control condition
-
-### What NOT to change:
-
-- Tool paths (unless they differ on your machine)
-- Trimming method parameters (unless you want to experiment)
-- Script code (it's all config-driven)
-
-### Steps to run:
-
-```bash
-# Navigate to pipeline directory
-cd pipeline/
-
-# Full pipeline:
-python scripts/run_pipeline.py --config config/config.yaml run
-
-# With a specific subset:
-python scripts/run_pipeline.py --config config/config.yaml run --subset day3_wt_vs_tet1
-
-# Only specific trimming methods:
-python scripts/run_pipeline.py --config config/config.yaml run --methods none cutadapt fastp
-
-# Only specific steps (e.g., just QC):
-python scripts/run_pipeline.py --config config/config.yaml run --steps 0 1 2 3 4
-```
-
----
-
-## Pipeline Stages
-
-| Step | Script | Description |
-|------|--------|-------------|
-| 0 | `00_validate_env.py` | Validate config, check tools, create directories, write manifest |
-| 1 | `01_prepare_samples.py` | Parse metadata, filter subset, create symlinks + samples.tsv |
-| 2 | `02_trim_reads.py` | Trim reads with each enabled method (none/cutadapt/fastp) |
-| 3 | `03_qc_fastqc.py` | Run FastQC on raw and trimmed reads |
-| 4 | `04_multiqc.py` | Generate MultiQC reports per method |
-| 5 | `05_map_star.py` | Map reads with STAR per method, index BAMs |
-| 6 | `06_bigwig.py` | Generate BigWigs (CPM + optional DESeq2-scaled) |
-| 7 | `07_featurecounts.py` | Count reads with featureCounts (multiple option sets) |
-| 8 | `08_filter_matrix.py` | Filter low-expression genes |
-| 9 | `09_deseq2.py` | Run DESeq2 for each method and contrast |
-| 10 | `10_compare_methods.py` | Compare trimming methods (mapping, counts, DEGs) |
-| 11 | `11_make_report.py` | Generate final Markdown + HTML report |
-
----
-
-## Trimming Method Comparison
-
-The pipeline runs all enabled trimming methods in parallel and tracks differences:
-
-- **none**: No trimming (baseline)
-- **cutadapt**: Adapter + quality trimming with cutadapt
-- **fastp**: All-in-one trimming with fastp (auto-detects adapters)
-- **trimmomatic**: Traditional sliding-window trimmer (disabled by default)
-
-Each downstream step (mapping, counting, DE) runs independently per method. Step 10 produces a comparison report showing:
-
-- Mapping rate differences
-- Assigned reads differences
-- Normalised count correlations
-- DEG overlap (Venn-style counts)
-- Method-sensitive genes (padj flips)
-
----
-
-## featureCounts Option Comparison
-
-The pipeline supports multiple featureCounts option sets (configured in YAML):
-
-- **default**: No special flags
-- **strict**: `-B -P -C -Q 10` (both ends mapped, proper pairs, no chimeras, MAPQ>=10)
-- **stringent**: `-B -P -C -Q 255` (unique mappers only)
-
-This follows the lecture homework: "Try different options in featureCounts (B, P, C, Q) and compare results."
-
----
-
-## BigWig Generation
-
-For each sample and method, three types of BigWig files can be generated:
-
-1. **CPM-normalised** with MAPQ=255 (unique mappers only)
-2. **DESeq2 size-factor scaled** with MAPQ=255 (if size factors available)
-
-This follows the lecture: `bamCoverage --scaleFactor 1/FACTOR --minMappingQuality 255`
-
----
-
-## Output Structure
-
-```
-results/<run_id>/
-  samples.tsv                          # Design table
-  sample_description.txt               # DESeq2 sample file
-  mapping_summary.tsv                  # STAR stats across methods
-  featurecounts_summary.tsv            # Assigned reads across methods
-  filtering_summary.tsv                # Filtering stats
-  de_summary.tsv                       # DEG counts across methods
-  trimming_summary.tsv                 # Trimming metrics
-  run_manifest.json                    # Reproducibility manifest
-  reports/
-    report.md                          # Final report (Markdown)
-    report.html                        # Final report (HTML)
-    method_comparison.md               # Detailed method comparison
-    multiqc_raw/                       # Raw reads QC
-    multiqc_none/                      # Per-method MultiQC
-    multiqc_cutadapt/
-    multiqc_fastp/
-  none/                                # Per-method results
-    star/                              # BAMs + STAR logs
-    featurecounts/                     # Count matrices
-    deseq2/                            # DE results + plots
-    bigwig/                            # BigWig tracks
-    qc/fastqc/                         # FastQC results
-  cutadapt/
-    ...
-  fastp/
-    ...
-```
-
----
-
-## Worked Example: GSE48519 (5mC Oxidation Paper)
-
-### Undifferentiated WT vs Tet1 vs Tet2
-
-This is the default configuration in `config.yaml`. The metadata filters for:
-- `Assay Type == "RNA-Seq"`
-- `differentiation == ""` (undifferentiated mESCs)
-
-```bash
-python scripts/run_pipeline.py --config config/config.yaml run
-```
-
-This maps 6 samples (wt_1, wt_2, tet1_1, tet1_2, tet2_1, tet2_2) and runs two contrasts: tet1 vs wt and tet2 vs wt.
-
-### Day 3 WT vs Tet1 (Exam Homework)
-
-To analyse the differentiation day 3 subset:
-
-1. In `config.yaml`, set `active_subset: "day3_wt_vs_tet1"` or use the CLI:
-
-```bash
-python scripts/run_pipeline.py --config config/config.yaml run --subset day3_wt_vs_tet1
-```
-
-2. Update the `comparisons` section if needed for the new conditions.
-
-### Using a Completely Different Dataset
-
-1. Place your FASTQs in a directory (e.g., `/data/NEW_STUDY/`)
-2. Place your metadata CSV alongside them
-3. Edit `config.yaml`:
-
-```yaml
-data:
-  metadata_csv: "/data/NEW_STUDY/metadata.csv"
-  fastq_dir: "/data/NEW_STUDY"
-  layout: "paired"   # or "single" or "auto"
-
-column_mapping:
-  run_id_col: "Run"                    # whatever your CSV calls it
-  condition_cols: ["treatment"]        # your condition column(s)
-  condition_map:
-    "control": "ctrl"
-    "drug_treated": "drug"
-
-references:
-  genome_index: "/data/indices/hg38/STAR"   # for human, etc.
-  gtf: "/data/indices/hg38/hg38.gtf"
-
-comparisons:
-  - name: "drug_vs_ctrl"
-    numerator: "drug"
-    denominator: "ctrl"
-```
-
-4. Run: `python scripts/run_pipeline.py --config config/config.yaml run`
-
-No code changes needed.
-
----
-
-## Running Tests
-
-```bash
-cd pipeline/
-python -m pytest tests/ -v
+    test_metadata.py
+    test_naming.py
 ```
 
 ---
 
 ## Dependencies
 
-Install via conda (recommended):
+On the university JupyterHub server, all dependencies are pre-installed. The `./py` wrapper ensures the correct environment is used.
+
+**Python packages**: pydeseq2, pandas, numpy, scipy, matplotlib, scikit-learn, pysam, HTSeq, pyyaml, markdown
+
+**System tools**: STAR, FastQC, MultiQC, cutadapt, featureCounts, samtools, deeptools (bamCoverage)
+
+For other environments, install via:
 
 ```bash
+# Conda (includes all tools):
 conda env create -f env/environment.yml
-conda activate rnaseq_pipeline
+
+# Or pip (Python packages only; system tools must be installed separately):
+./py -m pip install -r env/requirements.txt
 ```
-
-Or pip (Python packages only -- bioinformatics tools must be installed separately):
-
-```bash
-pip install -r env/requirements.txt
-```
-
-Required external tools: STAR, samtools, featureCounts (subread), FastQC, MultiQC, cutadapt, fastp, bamCoverage (deeptools).
-
-R is **not required** when using the default `pydeseq2` backend (pure Python). If you prefer the R-based DESeq2, set `deseq2.method: "rscript"` in config and ensure R + Bioconductor DESeq2 are installed.
-
----
 
 ---
 
 ## Running on Google Colab
 
-The pipeline can run on Colab using a chr19-only reference and test data (see `scripts/setup_colab.sh`). Colab runtimes are **ephemeral**: if the instance disconnects or crashes, the VM is recycled and you lose the clone, references, and any outputs that were only on the VM.
-
-### GPU vs CPU
-
-This pipeline is **CPU- and RAM-bound** (STAR, FastQC, HTSeq, PyDESeq2). **A GPU does not speed it up.** Choosing a GPU runtime only makes sense if Colab gives you a high-RAM GPU machine (e.g. T4) and you want the extra RAM to reduce out-of-memory crashes—not for GPU compute.
-
-### If Colab Keeps Crashing
-
-- **Run elsewhere** for reliability:
-  - **Locally** (Mac/Linux): use `config/config.yaml` with your paths; run the same commands. More RAM and no timeout.
-  - **University or lab HPC**: clone the repo, run as a batch job; no session time limit.
-  - **Cloud VM** (GCP, AWS, etc.): spin up a VM with enough RAM (e.g. 16–32 GB), clone the repo, run the pipeline; you pay for compute time but avoid Colab limits.
-- **Reduce load on Colab**: the Colab config already uses `threads: 2` and chr19-only. You can run in smaller chunks (e.g. steps 0–4, then 5–11 in a new session) and save outputs to Drive between runs.
-
-### Persisting Your Work on Colab
-
-1. **Clone the repo to Google Drive** so the code survives a disconnect:
-   ```python
-   from google.colab import drive
-   drive.mount('/content/drive')
-   # Clone into Drive (slower I/O, but persists)
-   %cd /content/drive/MyDrive
-   !git clone https://github.com/kevincallan/rna-seq.git
-   %cd rna-seq
-   !bash scripts/setup_colab.sh
-   ```
-   Use paths under `/content/drive/MyDrive/rna-seq` and adjust the Colab config so `results_dir` and `work_dir` point under Drive if you want outputs to persist too (see `scripts/setup_colab.sh` for an optional Drive layout).
-
-2. **Resume after a crash**: the pipeline has no automatic checkpoint. Re-run with the **same** `--run-id` and only the steps that did not complete:
-   ```bash
-   python scripts/run_pipeline.py --config config/config_colab.yaml --run-id <same_run_id> run --steps 3 4 5 6 7 8 9 10 11
-   ```
-   So note your `run_id` (e.g. from the first run’s output or from `results/`) and reuse it when resuming.
-
-3. **Back up results to Drive** after a run (if you didn’t run from Drive):
-   ```bash
-   cp -r results /content/drive/MyDrive/rna-seq_results_backup
-   ```
-
----
-
-## Design Principles
-
-- **One file per step**: Each script is independently runnable
-- **Config-driven**: All parameters in `config/config.yaml`
-- **Deterministic**: Same inputs + config = same outputs (sorted Run IDs for replicate numbering)
-- **No hard-coded IDs**: Works with any dataset via config
-- **No R required**: Default `pydeseq2` backend is pure Python (works on Colab, JupyterHub, anywhere)
-- **Safe subprocess calls**: `subprocess.run([...], check=True)`, no `shell=True`
-- **Full provenance**: `run_manifest.json` captures config hash, tool versions, timestamps
+See [docs/COLAB_COMMANDS.md](docs/COLAB_COMMANDS.md) for Colab-specific instructions, chunked runs, and memory tips. Colab uses `scripts/setup_colab.sh` to install dependencies and configure a chr19-only reference for fast testing.

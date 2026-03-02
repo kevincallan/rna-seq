@@ -32,7 +32,7 @@ echo "========================================="
 # -----------------------------------------------------------------
 echo ""
 echo ">>> Installing Python packages..."
-pip install -q pyyaml pandas numpy scipy matplotlib seaborn scikit-learn \
+pip install -q pyyaml pandas numpy scipy matplotlib scikit-learn \
     pydeseq2 pysam HTSeq cutadapt multiqc deeptools markdown anndata
 
 echo "    Python packages OK."
@@ -306,11 +306,11 @@ echo "  Config:           $REPO_ROOT/config/config_colab.yaml"
 echo ""
 echo "  To run the pipeline:"
 echo "    cd $REPO_ROOT"
-echo "    python scripts/run_pipeline.py --config config/config_colab.yaml run"
+echo "    ./py scripts/run_pipeline.py --config config/config_colab.yaml run"
 echo ""
 echo "  To run just QC + mapping (faster test):"
-echo "    python scripts/run_pipeline.py --config config/config_colab.yaml run --steps 0 1 2 5"
+echo "    ./py scripts/run_pipeline.py --config config/config_colab.yaml run --steps 0 1 2 5"
 echo ""
 echo "  To run with only 'none' trimming (fastest):"
-echo "    python scripts/run_pipeline.py --config config/config_colab.yaml run --methods none"
+echo "    ./py scripts/run_pipeline.py --config config/config_colab.yaml run --methods none"
 echo ""

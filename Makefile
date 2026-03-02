@@ -18,7 +18,7 @@
 CONFIG   ?= config/config.yaml
 METHODS  ?=
 SUBSET   ?=
-PYTHON   ?= python3
+PYTHON   ?= ./py
 
 # Build optional flags
 METHODS_FLAG = $(if $(METHODS),--methods $(METHODS),)

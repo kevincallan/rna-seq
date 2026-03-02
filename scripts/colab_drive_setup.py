@@ -13,7 +13,7 @@ Run from a Colab cell after mounting Drive, e.g.:
   %cd rna-seq
   !bash scripts/setup_colab.sh
 
-  !python scripts/colab_drive_setup.py
+  !./py scripts/colab_drive_setup.py
 
 Then run the pipeline as usual; results and work will be on Drive.
 """
@@ -65,7 +65,7 @@ def main() -> None:
         f.writelines(out)
 
     print("Config updated: results_dir, work_dir, logs_dir now point to Drive.")
-    print("Run: python scripts/run_pipeline.py --config config/config_colab.yaml run")
+    print("Run: ./py scripts/run_pipeline.py --config config/config_colab.yaml run")
 
 
 if __name__ == "__main__":

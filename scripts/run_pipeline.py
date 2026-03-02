@@ -3,31 +3,37 @@
 RNA-seq Pipeline Orchestrator
 ==============================
 
-Runs the full pipeline or individual steps.  All configuration comes
-from ``config/config.yaml`` (override with ``--config``).
+Runs the full pipeline or individual steps.  Configuration comes from
+``config/config.yaml``; dataset and species can be overridden on the
+command line so only one argument changes on exam day.
 
-Usage examples
---------------
-# Full pipeline:
-python scripts/run_pipeline.py --config config/config.yaml run
+Usage examples (JupyterHub)
+---------------------------
+# Full pipeline -- exam day command:
+./py scripts/run_pipeline.py --dataset GSE48519 --species mouse run
+
+# Explicit paths:
+./py scripts/run_pipeline.py --data-root /data --dataset GSE48519 --species mouse run
 
 # Specific steps only:
-python scripts/run_pipeline.py --config config/config.yaml run --steps 0 1 2 5
+./py scripts/run_pipeline.py --dataset GSE48519 --species mouse run --steps 0 1 2 5
 
 # Override trimming methods:
-python scripts/run_pipeline.py --config config/config.yaml run --methods none cutadapt fastp
+./py scripts/run_pipeline.py --dataset GSE48519 --species mouse run --methods none cutadapt
 
 # Use a specific subset filter:
-python scripts/run_pipeline.py --config config/config.yaml run --subset day3_wt_vs_tet1
+./py scripts/run_pipeline.py --dataset GSE48519 --species mouse run --subset day3
 
 # Single step:
-python scripts/run_pipeline.py --config config/config.yaml run --steps 5
+./py scripts/run_pipeline.py --dataset GSE48519 --species mouse run --steps 5
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
+import re
 import sys
 import time
 from pathlib import Path
@@ -46,6 +52,151 @@ from src.utils import (
 )
 
 logger = logging.getLogger("pipeline")
+
+
+# ---------------------------------------------------------------------------
+# Species -> reference path mapping
+# ---------------------------------------------------------------------------
+
+SPECIES_MAP: Dict[str, Dict[str, str]] = {
+    "mouse": {"genome": "mm39", "build": "mm39"},
+    "human": {"genome": "hg38", "build": "hg38"},
+}
+
+
+# ---------------------------------------------------------------------------
+# Runtime & data validation (runs before heavy compute)
+# ---------------------------------------------------------------------------
+
+def _check_runtime() -> None:
+    """Print interpreter info, verify packages, fail fast if anything missing."""
+    print("=" * 60)
+    print("Runtime check")
+    print("=" * 60)
+    print(f"Interpreter: {sys.executable}")
+    print(f"Python:      {sys.version.split(chr(10))[0]}")
+
+    if not sys.executable.startswith("/opt/jupyterhub/"):
+        print(f"WARNING: Not running under /opt/jupyterhub/bin/python3")
+        print(f"         Actual: {sys.executable}")
+        print(f"         Use:    ./py scripts/run_pipeline.py ...")
+
+    missing: List[str] = []
+    for pkg, import_name in [
+        ("pydeseq2", "pydeseq2"),
+        ("pandas", "pandas"),
+        ("scikit-learn", "sklearn"),
+        ("numpy", "numpy"),
+        ("scipy", "scipy"),
+        ("matplotlib", "matplotlib"),
+        ("pyyaml", "yaml"),
+        ("pysam", "pysam"),
+        ("HTSeq", "HTSeq"),
+    ]:
+        try:
+            mod = __import__(import_name)
+            ver = getattr(mod, "__version__", "?")
+            print(f"  {pkg:15s} {ver}")
+        except ImportError:
+            missing.append(pkg)
+            print(f"  {pkg:15s} MISSING")
+
+    if missing:
+        sys.exit(f"FATAL: Missing packages: {', '.join(missing)}")
+
+    print("=" * 60)
+
+
+def _apply_data_pointer(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
+    """Override config paths based on --dataset / --species CLI flags."""
+    if args.dataset:
+        dataset_dir = Path(args.data_root) / args.dataset
+        cfg["data"]["fastq_dir"] = str(dataset_dir)
+        cfg["data"]["metadata_csv"] = str(dataset_dir / "metadata.csv")
+        cfg["_data_root"] = args.data_root
+        cfg["_dataset"] = args.dataset
+
+    if args.metadata:
+        cfg["data"]["metadata_csv"] = args.metadata
+
+    if args.species:
+        if args.species not in SPECIES_MAP:
+            sys.exit(
+                f"FATAL: Unknown species '{args.species}'. "
+                f"Valid: {', '.join(sorted(SPECIES_MAP))}"
+            )
+        sp = SPECIES_MAP[args.species]
+        idx_base = Path(args.data_root) / "indices" / sp["genome"]
+        cfg["references"]["genome_index"] = str(idx_base / "STAR")
+        cfg["references"]["gtf"] = str(idx_base / f"{sp['build']}.gtf")
+        cfg["references"]["genome_fasta"] = str(idx_base / f"{sp['build']}.fa")
+
+    if args.outdir:
+        cfg["project"]["results_dir"] = args.outdir
+
+
+def _validate_data(cfg: Dict[str, Any], strict: bool = False) -> None:
+    """Confirm data directories, metadata, FASTQs, and references exist."""
+    print("=" * 60)
+    print("Data validation")
+    print("=" * 60)
+
+    dataset_dir = cfg["data"]["fastq_dir"]
+    metadata_path = cfg["data"]["metadata_csv"]
+
+    print(f"Dataset dir:  {dataset_dir}")
+    print(f"Metadata:     {metadata_path}")
+    print(f"STAR index:   {cfg['references']['genome_index']}")
+    print(f"GTF:          {cfg['references']['gtf']}")
+
+    errors: List[str] = []
+
+    if not Path(dataset_dir).is_dir():
+        errors.append(f"Dataset directory not found: {dataset_dir}")
+    if not Path(metadata_path).is_file():
+        errors.append(f"Metadata CSV not found: {metadata_path}")
+
+    ref_idx = cfg["references"]["genome_index"]
+    ref_gtf = cfg["references"]["gtf"]
+    if not Path(ref_idx).exists():
+        errors.append(f"STAR genome index not found: {ref_idx}")
+    if not Path(ref_gtf).exists():
+        errors.append(f"GTF annotation not found: {ref_gtf}")
+
+    if errors:
+        for e in errors:
+            print(f"  ERROR: {e}")
+        sys.exit(f"FATAL: {len(errors)} path(s) not found. Check --dataset / --species.")
+
+    run_col = cfg["column_mapping"]["run_id_col"]
+    with open(metadata_path, newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    run_ids = {row[run_col].strip() for row in rows if row.get(run_col)}
+
+    fastqs = sorted(Path(dataset_dir).glob("*.fastq.gz"))
+    fq_run_ids: set = set()
+    for fq in fastqs:
+        m = re.match(r"([SED]RR\d+|[SED]RA\d+)", fq.name)
+        if m:
+            fq_run_ids.add(m.group(1))
+
+    matched = run_ids & fq_run_ids
+    missing_fq = run_ids - fq_run_ids
+
+    print(f"Runs in metadata:  {len(run_ids)}")
+    print(f"FASTQ files found: {len(fastqs)} ({len(fq_run_ids)} unique run IDs)")
+    print(f"Matched runs:      {len(matched)}")
+
+    if len(matched) == 0:
+        sys.exit("FATAL: No metadata run IDs match any FASTQ filenames in dataset dir")
+
+    if missing_fq:
+        msg = f"{len(missing_fq)} run(s) in metadata have no FASTQ: {sorted(missing_fq)[:5]}"
+        if strict:
+            sys.exit(f"FATAL (--strict): {msg}")
+        print(f"  WARNING: {msg}")
+
+    print("=" * 60)
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +332,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override run ID (default: auto-generated from project name + timestamp)",
     )
 
+    # --- Data pointer args (override config paths) --------------------------
+    parser.add_argument(
+        "--data-root",
+        default="/data",
+        help="Root data directory on server (default: /data)",
+    )
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        help="Dataset accession (e.g. GSE48519). Derives fastq_dir and metadata_csv.",
+    )
+    parser.add_argument(
+        "--species",
+        default=None,
+        choices=sorted(SPECIES_MAP.keys()),
+        help="Species name -- derives genome index, GTF, FASTA paths.",
+    )
+    parser.add_argument(
+        "--metadata",
+        default=None,
+        help="Explicit metadata CSV path (overrides --dataset default).",
+    )
+    parser.add_argument(
+        "--outdir",
+        default=None,
+        help="Override results directory (default: results/<run_id>).",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail if any metadata run IDs lack matching FASTQ files.",
+    )
+
     sub = parser.add_subparsers(dest="command", help="Pipeline commands")
 
     # --- run subcommand -----------------------------------------------------
@@ -201,7 +385,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--subset",
         default=None,
-        help="Subset filter name from config (e.g., day3_wt_vs_tet1)",
+        help="Subset filter name from config (e.g., day3)",
+    )
+    run_p.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help="Override project thread count (e.g. 1 to reduce memory on Colab)",
     )
 
     # --- list subcommand ----------------------------------------------------
@@ -228,17 +418,30 @@ def main() -> None:
         print()
         sys.exit(0)
 
+    # --- Runtime check (interpreter + packages) -----------------------------
+    _check_runtime()
+
     # --- Load config --------------------------------------------------------
     cfg = load_config(args.config)
+
+    # --- Apply data pointer overrides from CLI ------------------------------
+    _apply_data_pointer(args, cfg)
+
     run_id = args.run_id or get_run_id(cfg)
 
     # Set up logging
     setup_logging(cfg["project"]["logs_dir"], run_id)
 
+    # --- Validate data paths before heavy compute ---------------------------
+    _validate_data(cfg, strict=args.strict)
+
     # Pre-enrich config with runtime paths (step 00 will enrich further)
     cfg["_run_id"] = run_id
     cfg["_results_dir"] = str(resolve_results_dir(cfg, run_id))
     cfg["_work_dir"] = str(resolve_work_dir(cfg))
+
+    if args.command == "run" and getattr(args, "threads", None) is not None:
+        cfg["project"]["threads"] = args.threads
 
     # --- Run ----------------------------------------------------------------
     if args.command == "run":

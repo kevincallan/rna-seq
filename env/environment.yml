@@ -10,7 +10,6 @@ dependencies:
   - numpy
   - scipy
   - matplotlib
-  - seaborn
   - scikit-learn
   # Pure-Python bioinformatics
   - pydeseq2>=0.4           # replaces R DESeq2

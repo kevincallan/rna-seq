@@ -7,8 +7,8 @@ Downloads FASTQ files for a list of SRA Run IDs using ``fasterq-dump``
 exam machines without internet access.
 
 Usage:
-    python scripts/download_sra.py --ids SRR925874 SRR925875 --outdir /data/fastqs
-    python scripts/download_sra.py --config config/config.yaml
+    ./py scripts/download_sra.py --ids SRR925874 SRR925875 --outdir /data/fastqs
+    ./py scripts/download_sra.py --config config/config.yaml
 """
 
 from __future__ import annotations

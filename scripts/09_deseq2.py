@@ -179,11 +179,22 @@ def run_pydeseq2(
     logger.info("  Significant DEGs (FDR < %s): %d (up=%d, down=%d)",
                 fdr, len(sig), n_up, n_down)
 
+    # --- Gene list for functional enrichment --------------------------------
+    enrichment_path = out_dir / "top_genes_for_enrichment.txt"
+    enrichment_path.write_text(
+        "\n".join(sig.index.tolist()), encoding="utf-8",
+    )
+    logger.info("  Gene list for enrichment: %d genes -> %s",
+                len(sig), enrichment_path)
+
     # --- PCA plot --------------------------------------------------------
     _pydeseq2_pca_plot(dds, metadata, contrast_name, out_dir)
 
     # --- MA plot ---------------------------------------------------------
     _pydeseq2_ma_plot(results, contrast_name, fdr, out_dir)
+
+    # --- Volcano plot ----------------------------------------------------
+    _pydeseq2_volcano_plot(results, contrast_name, fdr, lfc_threshold, out_dir)
 
     # --- Session info ----------------------------------------------------
     _pydeseq2_session_info(out_dir, contrast_name)
@@ -269,6 +280,48 @@ def _pydeseq2_ma_plot(results, contrast_name: str, fdr: float, out_dir: Path) ->
         logger.info("  MA plot saved.")
     except Exception as exc:
         logger.warning("  MA plot failed: %s", exc)
+
+
+def _pydeseq2_volcano_plot(
+    results, contrast_name: str, fdr: float, lfc_threshold: float, out_dir: Path,
+) -> None:
+    """Generate a volcano plot: log2FC (x) vs -log10(padj) (y)."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+
+        padj = results["padj"].values.astype(float)
+        lfc = results["log2FoldChange"].values.astype(float)
+        neg_log_p = -np.log10(np.where(padj > 0, padj, 1e-300))
+
+        sig = np.isfinite(padj) & (padj < fdr)
+        if lfc_threshold > 0:
+            sig = sig & (np.abs(lfc) > lfc_threshold)
+
+        ax.scatter(lfc[~sig], neg_log_p[~sig], s=4, alpha=0.4,
+                   color="grey", label="NS")
+        ax.scatter(lfc[sig], neg_log_p[sig], s=6, alpha=0.6,
+                   color="red", label=f"FDR < {fdr}")
+        ax.axhline(-np.log10(fdr), color="blue", linestyle="--", linewidth=0.5,
+                   label=f"p_adj = {fdr}")
+        if lfc_threshold > 0:
+            ax.axvline(lfc_threshold, color="blue", linestyle="--", linewidth=0.5)
+            ax.axvline(-lfc_threshold, color="blue", linestyle="--", linewidth=0.5)
+
+        ax.set_xlabel("log2 Fold Change")
+        ax.set_ylabel("-log10(adjusted p-value)")
+        ax.set_title(f"Volcano Plot - {contrast_name}")
+        ax.legend(fontsize=8)
+        fig.tight_layout()
+        fig.savefig(out_dir / "volcano.pdf")
+        plt.close(fig)
+        logger.info("  Volcano plot saved.")
+    except Exception as exc:
+        logger.warning("  Volcano plot failed: %s", exc)
 
 
 def _pydeseq2_session_info(out_dir: Path, contrast_name: str) -> None:
