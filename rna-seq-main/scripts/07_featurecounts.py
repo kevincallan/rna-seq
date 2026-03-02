@@ -48,6 +48,7 @@ def run_featurecounts(
     out_path: Path,
     cfg: Dict[str, Any],
     option_set: Dict[str, Any],
+    paired_end: bool = False,
 ) -> Path:
     """Run featureCounts with a specific option set."""
     exe = cfg["tools"].get("featurecounts", "featureCounts")
@@ -63,6 +64,11 @@ def run_featurecounts(
         "-g", fc_cfg.get("attribute", "gene_id"),
         "-s", str(fc_cfg.get("strandedness", 2)),
     ]
+
+    # IMPORTANT: featureCounts needs -p for paired-end BAMs.
+    # Without -p, it treats the library as single-end and fails.
+    if paired_end:
+        cmd.append("-p")
 
     if option_set.get("B", False):
         cmd.append("-B")
@@ -290,6 +296,8 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
             logger.error("No BAM files for method '%s', skipping", method)
             continue
 
+        paired_end = any(getattr(s, "layout", "paired") == "paired" for s in samples)
+
         for opt_name, opt_params in option_sets.items():
             logger.info("  Option set: %s", opt_name)
 
@@ -304,7 +312,14 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
             else:
                 # featureCounts binary
                 raw_counts = fc_dir / f"counts_{opt_name}.tsv"
-                run_featurecounts(bam_files, gtf, raw_counts, cfg, opt_params)
+                run_featurecounts(
+                    bam_files,
+                    gtf,
+                    raw_counts,
+                    cfg,
+                    opt_params,
+                    paired_end=paired_end,
+                )
 
                 # Clean matrix
                 clean_counts = fc_dir / f"count_matrix_{opt_name}.tsv"
