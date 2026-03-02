@@ -68,9 +68,9 @@ active_subset: "default"
 
 # -- Reference genome ---------------------------------------------------------
 references:
-  genome_index: "/data/indices/mm39/star"        # STAR genome directory
-  gtf: "/data/indices/mm39/mm39.gtf"             # gene annotation GTF
-  genome_fasta: "/data/indices/mm39/mm39.fa"     # genome FASTA (for some tools)
+  genome_index: "/data/indices/mm39/star"
+  gtf: "/data/genomes/mouse/GRCm39/Mus_musculus.GRCm39.114.chr_gene_names.gtf.gz"
+  genome_fasta: "/data/genomes/mouse/GRCm39/Mus_musculus.GRCm39.dna.primary_assembly_no_scaffolds.fa.gz"
 
 # -- Tool paths ---------------------------------------------------------------
 # Leave as tool name to use $PATH, or give absolute path.

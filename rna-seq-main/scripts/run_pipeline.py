@@ -59,8 +59,14 @@ logger = logging.getLogger("pipeline")
 # ---------------------------------------------------------------------------
 
 SPECIES_MAP: Dict[str, Dict[str, str]] = {
-    "mouse": {"genome": "mm39", "build": "mm39"},
-    "human": {"genome": "hg38", "build": "hg38"},
+    "mouse": {
+        "index_dir": "mm39",
+        "genome_dir": "/data/genomes/mouse/GRCm39",
+    },
+    "human": {
+        "index_dir": "hg38",
+        "genome_dir": "/data/genomes/human",
+    },
 }
 
 
@@ -120,17 +126,40 @@ def _find_star_index(genome_dir: Path) -> str:
 
 
 def _find_gtf(genome_dir: Path, build: str) -> str:
-    """Auto-discover GTF file inside a genome directory."""
-    for pattern in [f"{build}.gtf", "*.gtf", f"{build}.gtf.gz"]:
+    """Auto-discover GTF file inside a genome directory.
+
+    Preference order: gene_names GTF > chr GTF > any GTF > gzipped versions.
+    """
+    if build != "*":
+        for pattern in [f"{build}.gtf", f"{build}*.gtf"]:
+            matches = sorted(genome_dir.glob(pattern))
+            if matches:
+                return str(matches[0])
+
+    # Prefer gene_names variants, then chr variants, then any
+    for pattern in ["*gene_names*.gtf.gz", "*gene_names*.gtf",
+                    "*chr*.gtf.gz", "*chr*.gtf",
+                    "*.gtf", "*.gtf.gz"]:
         matches = sorted(genome_dir.glob(pattern))
         if matches:
-            return str(matches[0])
+            return str(matches[-1])  # latest version (highest number)
     return str(genome_dir / f"{build}.gtf")
 
 
 def _find_fasta(genome_dir: Path, build: str) -> str:
-    """Auto-discover genome FASTA inside a genome directory."""
-    for pattern in [f"{build}.fa", f"{build}.fasta", "*.fa", "*.fasta"]:
+    """Auto-discover genome FASTA inside a genome directory.
+
+    Prefers uncompressed, then gzipped. Prefers primary_assembly.
+    """
+    if build != "*":
+        for pattern in [f"{build}.fa", f"{build}.fasta",
+                        f"{build}*.fa", f"{build}*.fasta"]:
+            matches = sorted(genome_dir.glob(pattern))
+            if matches:
+                return str(matches[0])
+
+    for pattern in ["*primary_assembly*.fa", "*primary_assembly*.fa.gz",
+                    "*.fa", "*.fasta", "*.fa.gz", "*.fasta.gz"]:
         matches = sorted(genome_dir.glob(pattern))
         if matches:
             return str(matches[0])
@@ -156,10 +185,11 @@ def _apply_data_pointer(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
                 f"Valid: {', '.join(sorted(SPECIES_MAP))}"
             )
         sp = SPECIES_MAP[args.species]
-        idx_base = Path(args.data_root) / "indices" / sp["genome"]
+        idx_base = Path(args.data_root) / "indices" / sp["index_dir"]
+        genome_dir = Path(sp["genome_dir"])
         cfg["references"]["genome_index"] = _find_star_index(idx_base)
-        cfg["references"]["gtf"] = _find_gtf(idx_base, sp["build"])
-        cfg["references"]["genome_fasta"] = _find_fasta(idx_base, sp["build"])
+        cfg["references"]["gtf"] = _find_gtf(genome_dir, "*")
+        cfg["references"]["genome_fasta"] = _find_fasta(genome_dir, "*")
 
     if args.outdir:
         cfg["project"]["results_dir"] = args.outdir
