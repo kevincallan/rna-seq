@@ -174,6 +174,79 @@ def compute_correlation(
     return cov / (std_a * std_b)
 
 
+def summarize_featurecounts_options(
+    fc_rows: List[Dict[str, str]],
+) -> Dict[Tuple[str, str], Dict[str, float]]:
+    """Aggregate assigned-read stats by (method, option_set)."""
+    agg: Dict[Tuple[str, str], Dict[str, float]] = defaultdict(
+        lambda: {"n": 0.0, "sum": 0.0, "min": float("inf"), "max": float("-inf")}
+    )
+    for row in fc_rows:
+        method = row.get("method", "")
+        opt = row.get("option_set", "")
+        try:
+            val = float(row.get("assigned_reads", "0"))
+        except ValueError:
+            continue
+        key = (method, opt)
+        a = agg[key]
+        a["n"] += 1
+        a["sum"] += val
+        a["min"] = min(a["min"], val)
+        a["max"] = max(a["max"], val)
+    return agg
+
+
+def count_degs_at_thresholds(
+    de_all_path: Path,
+    fdr_values: List[float],
+    lfc_abs_threshold: float = 1.0,
+) -> Dict[str, int]:
+    """Count DEGs under multiple FDR / LFC thresholds from one de_all.tsv."""
+    out: Dict[str, int] = {f"fdr_{f}": 0 for f in fdr_values}
+    out["fdr_0.05_lfc1"] = 0
+
+    if not de_all_path.exists():
+        return out
+
+    with open(de_all_path, encoding="utf-8") as fh:
+        header = fh.readline().strip().split("\t")
+        padj_idx = -1
+        lfc_idx = -1
+        for i, h in enumerate(header):
+            hl = h.lower()
+            if "padj" in hl:
+                padj_idx = i
+            if "log2foldchange" in hl:
+                lfc_idx = i
+
+        if padj_idx < 0:
+            return out
+
+        for line in fh:
+            parts = line.strip().split("\t")
+            try:
+                padj = float(parts[padj_idx])
+            except (ValueError, IndexError):
+                continue
+            if padj != padj:  # NaN guard
+                continue
+
+            for f in fdr_values:
+                if padj < f:
+                    out[f"fdr_{f}"] += 1
+
+            if lfc_idx >= 0:
+                try:
+                    lfc = float(parts[lfc_idx])
+                    if padj < 0.05 and abs(lfc) >= lfc_abs_threshold:
+                        out["fdr_0.05_lfc1"] += 1
+                except (ValueError, IndexError):
+                    continue
+
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Main comparison logic
 # ---------------------------------------------------------------------------
@@ -223,6 +296,50 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
             )
     else:
         comparison_lines.append("*(featureCounts summary not available)*\n")
+
+    # === 2b. featureCounts option-set impact ================================
+    comparison_lines.append("\n## featureCounts Option-Set Impact\n")
+    if fc_data:
+        option_stats = summarize_featurecounts_options(fc_data)
+        comparison_lines.append(
+            "| Method | Option Set | N samples | Mean assigned reads | Min | Max |"
+        )
+        comparison_lines.append(
+            "|--------|------------|-----------|---------------------|-----|-----|"
+        )
+        for (method, opt), stats in sorted(option_stats.items()):
+            n = int(stats["n"])
+            mean = stats["sum"] / stats["n"] if stats["n"] else 0.0
+            min_v = int(stats["min"]) if n else 0
+            max_v = int(stats["max"]) if n else 0
+            comparison_lines.append(
+                f"| {method} | {opt} | {n} | {mean:.1f} | {min_v} | {max_v} |"
+            )
+
+        # Delta versus default per method
+        comparison_lines.append("\n### Delta vs default option set\n")
+        comparison_lines.append(
+            "| Method | Option Set | Mean assigned | Delta vs default |"
+        )
+        comparison_lines.append(
+            "|--------|------------|---------------|------------------|"
+        )
+        by_method: Dict[str, Dict[str, float]] = defaultdict(dict)
+        for (method, opt), stats in option_stats.items():
+            mean = stats["sum"] / stats["n"] if stats["n"] else 0.0
+            by_method[method][opt] = mean
+        for method, opt_map in sorted(by_method.items()):
+            base = opt_map.get("default")
+            for opt, mean in sorted(opt_map.items()):
+                if base is None:
+                    delta = "N/A"
+                else:
+                    delta = f"{mean - base:+.1f}"
+                comparison_lines.append(
+                    f"| {method} | {opt} | {mean:.1f} | {delta} |"
+                )
+    else:
+        comparison_lines.append("*(featureCounts option impact unavailable)*\n")
 
     # === 3. Normalised count correlation ====================================
     comparison_lines.append("\n## Normalised Count Correlation Between Methods\n")
@@ -341,6 +458,32 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                 comparison_lines.append(f"\n*(... and {len(flipped) - 50} more)*\n")
         else:
             comparison_lines.append("No method-sensitive genes detected.\n")
+
+    # === 6. DE threshold sensitivity ========================================
+    comparison_lines.append("\n## DE Threshold Sensitivity\n")
+    comparison_lines.append(
+        "Counts of significant genes under different thresholds "
+        "(computed from existing `de_all.tsv`, no rerun required).\n"
+    )
+    fdr_values = [0.01, 0.05, 0.1]
+    comparison_lines.append(
+        "| Method | Contrast | FDR<0.01 | FDR<0.05 | FDR<0.1 | FDR<0.05 & |log2FC|>=1 |"
+    )
+    comparison_lines.append(
+        "|--------|----------|----------|----------|---------|-----------------------|"
+    )
+    for method in methods:
+        for contrast in comparisons:
+            cname = contrast["name"]
+            de_path = results_dir / method / "deseq2" / cname / "de_all.tsv"
+            if not de_path.exists():
+                de_path = results_dir / method / "deseq2" / "DESeq2.de_all.tsv"
+            stats = count_degs_at_thresholds(de_path, fdr_values)
+            comparison_lines.append(
+                f"| {method} | {cname} | {stats['fdr_0.01']} | "
+                f"{stats['fdr_0.05']} | {stats['fdr_0.1']} | "
+                f"{stats['fdr_0.05_lfc1']} |"
+            )
 
     # --- Write comparison report --------------------------------------------
     report_path = report_dir / "method_comparison.md"
