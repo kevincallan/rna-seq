@@ -30,7 +30,7 @@ help:
 	@echo "Available targets:"
 	@echo "  run       Full pipeline"
 	@echo "  qc        Steps 0-4 (validate + samples + trim + QC)"
-	@echo "  map       Steps 0-5 (through STAR mapping)"
+	@echo "  map       Steps 0-5 (through read mapping)"
 	@echo "  count     Steps 0-8 (through matrix filtering)"
 	@echo "  de        Steps 0-9 (through DESeq2)"
 	@echo "  report    Step 11 only (generate report)"

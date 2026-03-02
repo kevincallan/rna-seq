@@ -64,6 +64,54 @@ def _infer_methods_from_outputs(results_dir: Path, cfg: Dict[str, Any]) -> List[
     return sorted(methods)
 
 
+def _infer_analysis_units(results_dir: Path, methods: List[str]) -> List[Dict[str, str]]:
+    """Infer trim/mapping analysis units from DE or mapping summaries."""
+    units: set[tuple[str, str, str]] = set()
+    de_summary = results_dir / "de_summary.tsv"
+    if de_summary.exists():
+        with open(de_summary, encoding="utf-8") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            for row in reader:
+                method = row.get("method") or row.get("trim_method") or ""
+                if method not in methods:
+                    continue
+                mapper = row.get("mapper", "star")
+                mapper_opt = row.get("mapper_option_set", "default")
+                units.add((method, mapper, mapper_opt))
+
+    if not units:
+        mapping_summary = results_dir / "mapping_summary.tsv"
+        if mapping_summary.exists():
+            with open(mapping_summary, encoding="utf-8") as fh:
+                reader = csv.DictReader(fh, delimiter="\t")
+                for row in reader:
+                    method = row.get("method") or row.get("trim_method") or ""
+                    if method not in methods:
+                        continue
+                    mapper = row.get("mapper", "star")
+                    mapper_opt = row.get("mapper_option_set", "default")
+                    units.add((method, mapper, mapper_opt))
+
+    if not units:
+        for method in methods:
+            units.add((method, "star", "default"))
+
+    return [
+        {"method": m, "mapper": p, "mapper_option_set": o}
+        for (m, p, o) in sorted(units)
+    ]
+
+
+def _de_base_for_unit(results_dir: Path, unit: Dict[str, str]) -> Path:
+    method = unit["method"]
+    mapper = unit.get("mapper", "star")
+    mapper_opt = unit.get("mapper_option_set", "default")
+    nested = results_dir / method / "deseq2" / mapper / mapper_opt
+    if nested.exists():
+        return nested
+    return results_dir / method / "deseq2"
+
+
 def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None:
     """Execute step 11."""
     logger.info("=" * 60)
@@ -72,6 +120,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
 
     results_dir = Path(cfg["_results_dir"])
     methods = methods_override or _infer_methods_from_outputs(results_dir, cfg)
+    analysis_units = _infer_analysis_units(results_dir, methods)
     comparisons = cfg.get("comparisons", [])
     project_name = cfg["project"]["name"]
 
@@ -151,15 +200,19 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     else:
         rpt.paragraph("*(DE summary not available)*")
 
-    # Per-method detail
-    for method in methods:
-        rpt.h3(f"Method: {method}")
+    # Per-analysis-unit detail
+    for unit in analysis_units:
+        method = unit["method"]
+        mapper = unit.get("mapper", "star")
+        mapper_opt = unit.get("mapper_option_set", "default")
+        rpt.h3(f"Analysis Unit: {method} / {mapper} / {mapper_opt}")
 
+        de_base = _de_base_for_unit(results_dir, unit)
         for contrast in comparisons:
             cname = contrast["name"]
             rpt.h4(f"Contrast: {cname}")
 
-            de_all = results_dir / method / "deseq2" / cname / "de_all.tsv"
+            de_all = de_base / cname / "de_all.tsv"
             if de_all.exists():
                 rpt.paragraph(f"Full results: `{de_all}`")
 
@@ -177,7 +230,9 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                 if lines:
                     rpt.table(headers, lines)
             else:
-                rpt.paragraph(f"*(Results not found for {method}/{cname})*")
+                rpt.paragraph(
+                    f"*(Results not found for {method}/{mapper}/{mapper_opt}/{cname})*"
+                )
 
     # === Trimming comparison ================================================
     rpt.h2("Trimming Method Comparison")

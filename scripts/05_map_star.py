@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-Step 05 -- Map reads with STAR.
+Step 05 -- Map reads.
 
-Maps reads for each trimming method separately.  Produces sorted BAM
-files, BAM indices, and a mapping summary table parsed from STAR
-``Log.final.out``.
+Supports multiple mapping approaches (mapper backend + option set), for
+example:
+  - STAR default vs STAR strict_unique
+  - STAR vs HISAT2
+
+Produces mapper-tagged BAM files, BAM indices, and a mapping summary.
 """
 
 from __future__ import annotations
 
 import csv
 import logging
-import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -44,6 +46,7 @@ def map_sample_star(
     genome_dir: str,
     out_prefix: str,
     cfg: Dict[str, Any],
+    option_set: Dict[str, Any],
 ) -> Path:
     """Run STAR for a single sample and return the BAM path."""
     exe = cfg["tools"].get("star", "STAR")
@@ -64,10 +67,12 @@ def map_sample_star(
         "--outSAMtype", "BAM", "SortedByCoordinate",
         "--outFileNamePrefix", out_prefix,
         "--runThreadN", str(threads),
-        "--outFilterMultimapNmax", str(star_p.get("outFilterMultimapNmax", 20)),
+        "--outFilterMultimapNmax", str(
+            option_set.get("outFilterMultimapNmax", star_p.get("outFilterMultimapNmax", 20))
+        ),
     ])
 
-    extra = star_p.get("extra_args", "")
+    extra = option_set.get("extra_args", star_p.get("extra_args", ""))
     if extra:
         cmd.extend(extra.split())
 
@@ -75,6 +80,56 @@ def map_sample_star(
 
     bam = Path(f"{out_prefix}Aligned.sortedByCoord.out.bam")
     return bam
+
+
+def map_sample_hisat2(
+    sample_name: str,
+    r1: Path,
+    r2: Path | None,
+    index_prefix: str,
+    out_dir: Path,
+    cfg: Dict[str, Any],
+    option_set: Dict[str, Any],
+) -> Tuple[Path, Path]:
+    """Run HISAT2 + samtools sort/index. Return (bam_path, log_path)."""
+    hisat2 = cfg["tools"].get("hisat2", "hisat2")
+    samtools = cfg["tools"].get("samtools", "samtools")
+    threads = cfg["project"].get("threads", 4)
+    sam_path = out_dir / f"{sample_name}.hisat2.sam"
+    bam_path = out_dir / f"{sample_name}.hisat2.sorted.bam"
+    log_path = out_dir / f"{sample_name}.hisat2.log"
+
+    cmd = [
+        hisat2,
+        "-x", index_prefix,
+        "-p", str(threads),
+        "-S", str(sam_path),
+    ]
+    if r2 is None:
+        cmd.extend(["-U", str(r1)])
+    else:
+        cmd.extend(["-1", str(r1), "-2", str(r2)])
+
+    extra = option_set.get("extra_args", "")
+    if extra:
+        cmd.extend(extra.split())
+
+    result = run_cmd(cmd, description=f"HISAT2 {sample_name}")
+    log_path.write_text(result.stderr or "", encoding="utf-8")
+
+    run_cmd(
+        [
+            samtools, "sort",
+            "-@", str(threads),
+            "-o", str(bam_path),
+            str(sam_path),
+        ],
+        description=f"samtools sort {sample_name}",
+    )
+    if sam_path.exists():
+        sam_path.unlink()
+
+    return bam_path, log_path
 
 
 def index_bam(bam: Path, cfg: Dict[str, Any]) -> None:
@@ -135,6 +190,76 @@ def extract_mapping_summary(star_stats: Dict[str, str]) -> Dict[str, str]:
     return summary
 
 
+def parse_hisat2_log(log_path: Path) -> Dict[str, str]:
+    """Parse HISAT2 stderr log into a STAR-like summary schema."""
+    summary = {
+        "input_reads": "N/A",
+        "uniquely_mapped": "N/A",
+        "uniquely_mapped_pct": "N/A",
+        "multi_mapped": "N/A",
+        "multi_mapped_pct": "N/A",
+        "unmapped_mismatch": "N/A",
+        "unmapped_short": "N/A",
+        "unmapped_other": "N/A",
+        "unmapped_mismatch_pct": "N/A",
+        "unmapped_short_pct": "N/A",
+    }
+    if not log_path.exists():
+        return summary
+
+    text = log_path.read_text(encoding="utf-8", errors="ignore")
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.endswith("reads; of these:"):
+            # Example: "12345 reads; of these:"
+            summary["input_reads"] = line.split(" reads;")[0].replace(",", "").strip()
+        elif "aligned exactly 1 time" in line:
+            # Capture the first exact-1-time bucket as unique proxy.
+            if summary["uniquely_mapped"] == "N/A":
+                parts = line.split()
+                if parts:
+                    summary["uniquely_mapped"] = parts[0].replace(",", "")
+                if "(" in line and "%" in line:
+                    pct = line.split("(")[1].split(")")[0]
+                    summary["uniquely_mapped_pct"] = pct
+        elif "aligned >1 times" in line:
+            parts = line.split()
+            if parts:
+                summary["multi_mapped"] = parts[0].replace(",", "")
+            if "(" in line and "%" in line:
+                pct = line.split("(")[1].split(")")[0]
+                summary["multi_mapped_pct"] = pct
+        elif "aligned 0 times" in line:
+            # HISAT2 doesn't break out mismatch/short/other categories.
+            parts = line.split()
+            if parts:
+                summary["unmapped_other"] = parts[0].replace(",", "")
+            if "(" in line and "%" in line:
+                pct = line.split("(")[1].split(")")[0]
+                summary["unmapped_short_pct"] = pct
+    return summary
+
+
+def get_mapping_runs(cfg: Dict[str, Any]) -> List[Tuple[str, str, Dict[str, Any]]]:
+    """Return enabled (mapper, option_set_name, option_set_params) tuples."""
+    mapping_cfg = cfg.get("mapping", {}).get("backends", {})
+    runs: List[Tuple[str, str, Dict[str, Any]]] = []
+
+    if mapping_cfg:
+        for mapper, mapper_cfg in mapping_cfg.items():
+            if not isinstance(mapper_cfg, dict) or not mapper_cfg.get("enabled", False):
+                continue
+            option_sets = mapper_cfg.get("option_sets", {"default": {}})
+            for opt_name, opt_params in option_sets.items():
+                runs.append((mapper, opt_name, dict(opt_params or {})))
+
+    if not runs:
+        # Backward-compatible fallback: STAR single run from old config.
+        runs.append(("star", "default", {}))
+
+    return runs
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -142,59 +267,86 @@ def extract_mapping_summary(star_stats: Dict[str, str]) -> Dict[str, str]:
 def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None:
     """Execute step 05."""
     logger.info("=" * 60)
-    logger.info("STEP 05: STAR mapping")
+    logger.info("STEP 05: Read mapping")
     logger.info("=" * 60)
 
     work_dir = resolve_work_dir(cfg)
     results_dir = Path(cfg["_results_dir"])
-    genome_dir = cfg["references"]["genome_index"]
-
     samples_tsv = Path(cfg.get("_samples_tsv", results_dir / "samples.tsv"))
     samples = read_samples_tsv(samples_tsv)
     methods = methods_override or get_enabled_methods(cfg)
+    mapping_runs = get_mapping_runs(cfg)
+    mapping_cfg = cfg.get("mapping", {}).get("backends", {})
 
     all_mapping_stats: List[Dict[str, str]] = []
 
     for method in methods:
-        logger.info("--- Mapping method: %s ---", method)
+        logger.info("--- Trimming method: %s ---", method)
         trim_dir = work_dir / "trimmed" / method
-        star_out_dir = results_dir / method / "star"
-        ensure_dirs(star_out_dir)
+        for mapper, map_opt_name, map_opt_params in mapping_runs:
+            logger.info("  Mapping approach: %s / %s", mapper, map_opt_name)
+            map_out_dir = results_dir / method / "mapping" / mapper / map_opt_name
+            ensure_dirs(map_out_dir)
 
-        for s in samples:
-            logger.info("  Mapping %s ...", s.sample_name)
+            mapper_cfg = mapping_cfg.get(mapper, {})
+            for s in samples:
+                logger.info("    Mapping %s ...", s.sample_name)
 
-            if s.layout == "paired":
-                r1 = trim_dir / f"{s.sample_name}_1.fastq.gz"
-                r2 = trim_dir / f"{s.sample_name}_2.fastq.gz"
-            else:
-                r1 = trim_dir / f"{s.sample_name}.fastq.gz"
-                r2 = None
+                if s.layout == "paired":
+                    r1 = trim_dir / f"{s.sample_name}_1.fastq.gz"
+                    r2 = trim_dir / f"{s.sample_name}_2.fastq.gz"
+                else:
+                    r1 = trim_dir / f"{s.sample_name}.fastq.gz"
+                    r2 = None
 
-            prefix = str(star_out_dir / f"{s.sample_name}_")
+                if mapper == "hisat2":
+                    index_prefix = str(mapper_cfg.get("index_prefix", "")).strip()
+                    if not index_prefix:
+                        logger.warning(
+                            "HISAT2 enabled but index_prefix is empty; skipping %s/%s",
+                            method, s.sample_name,
+                        )
+                        continue
+                    bam, log_path = map_sample_hisat2(
+                        s.sample_name, r1, r2, index_prefix, map_out_dir, cfg, map_opt_params,
+                    )
+                    if bam.exists():
+                        index_bam(bam, cfg)
+                    summary = parse_hisat2_log(log_path)
+                else:
+                    genome_dir = str(
+                        mapper_cfg.get("genome_index", cfg["references"]["genome_index"])
+                    )
+                    prefix = str(map_out_dir / f"{s.sample_name}_")
+                    bam = map_sample_star(
+                        s.sample_name, r1, r2, genome_dir, prefix, cfg, map_opt_params,
+                    )
+                    if bam.exists():
+                        index_bam(bam, cfg)
+                    else:
+                        logger.error("BAM not found after STAR: %s", bam)
+                        continue
+                    star_log = Path(f"{prefix}Log.final.out")
+                    raw_stats = parse_star_log(star_log)
+                    summary = extract_mapping_summary(raw_stats)
 
-            bam = map_sample_star(s.sample_name, r1, r2, genome_dir, prefix, cfg)
-
-            # Index BAM
-            if bam.exists():
-                index_bam(bam, cfg)
-            else:
-                logger.error("BAM not found after STAR: %s", bam)
-                continue
-
-            # Parse STAR log
-            star_log = Path(f"{prefix}Log.final.out")
-            raw_stats = parse_star_log(star_log)
-            summary = extract_mapping_summary(raw_stats)
-            summary["method"] = method
-            summary["sample"] = s.sample_name
-            all_mapping_stats.append(summary)
+                summary["method"] = method
+                summary["trim_method"] = method
+                summary["mapper"] = mapper
+                summary["mapper_option_set"] = map_opt_name
+                summary["sample"] = s.sample_name
+                summary["bam_path"] = str(bam)
+                all_mapping_stats.append(summary)
 
     # Write mapping summary table
     summary_path = results_dir / "mapping_summary.tsv"
     if all_mapping_stats:
-        fields = ["method", "sample"] + [
-            k for k in all_mapping_stats[0] if k not in ("method", "sample")
+        fields = [
+            "trim_method", "method", "mapper", "mapper_option_set", "sample", "bam_path",
+            "input_reads", "uniquely_mapped", "uniquely_mapped_pct",
+            "multi_mapped", "multi_mapped_pct",
+            "unmapped_mismatch", "unmapped_short", "unmapped_other",
+            "unmapped_mismatch_pct", "unmapped_short_pct",
         ]
         with open(summary_path, "w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=fields, delimiter="\t",

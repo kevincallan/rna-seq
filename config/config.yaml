@@ -88,9 +88,34 @@ tools:
   fastp: "fastp"
   trimmomatic: "trimmomatic"
   star: "STAR"
+  hisat2: "hisat2"
   samtools: "samtools"
   featurecounts: "featureCounts"
   bamcoverage: "bamCoverage"
+
+# -- Mapping approaches --------------------------------------------------------
+# Step 05:
+# Define one or more mapping approaches (mapper + parameter set).
+# Enable multiple option sets to compare mapping strictness/sensitivity.
+mapping:
+  backends:
+    star:
+      enabled: true
+      genome_index: "/data/indices/mm39/star"  # fallback: references.genome_index
+      option_sets:
+        default:
+          outFilterMultimapNmax: 20
+          extra_args: ""
+        strict_unique:
+          outFilterMultimapNmax: 1
+          extra_args: ""
+    hisat2:
+      enabled: false
+      # HISAT2 index prefix (without .1.ht2/.2.ht2 suffix)
+      index_prefix: ""
+      option_sets:
+        default:
+          extra_args: ""
 
 # -- STAR mapping parameters --------------------------------------------------
 star_params:
@@ -186,6 +211,11 @@ deseq2:
   # Keep method=pydeseq2 for exam environment (no R required).
   # fdr_threshold controls significance stringency.
   # lfc_threshold can enforce biological effect-size filtering.
+  # Enrichment exports are generated automatically per contrast:
+  #   top_genes_for_enrichment.txt
+  #   top_up_genes_for_enrichment.txt
+  #   top_down_genes_for_enrichment.txt
+  #   top200_* (capped upload lists for web tools)
   fdr_threshold: 0.05
   lfc_threshold: 0.0      # log2 fold-change threshold (0 = no effect-size filter)
   # Backend for differential expression:

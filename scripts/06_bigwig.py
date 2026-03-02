@@ -10,6 +10,7 @@ Produces per-sample BigWig files for each trimming method:
 from __future__ import annotations
 
 import logging
+import csv
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -29,6 +30,52 @@ from src.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def build_mapping_units(
+    results_dir: Path,
+    samples: list,
+    methods: List[str],
+) -> List[Dict[str, Any]]:
+    """Collect mapping units and per-sample BAMs."""
+    mapping_summary = results_dir / "mapping_summary.tsv"
+    units: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    if mapping_summary.exists():
+        with open(mapping_summary, encoding="utf-8") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            for row in reader:
+                method = row.get("method") or row.get("trim_method") or ""
+                mapper = row.get("mapper", "star")
+                mapper_opt = row.get("mapper_option_set", "default")
+                sample = row.get("sample", "")
+                bam_path = row.get("bam_path", "")
+                if method not in methods or not sample or not bam_path:
+                    continue
+                key = (method, mapper, mapper_opt)
+                if key not in units:
+                    units[key] = {
+                        "method": method,
+                        "mapper": mapper,
+                        "mapper_option_set": mapper_opt,
+                        "sample_to_bam": {},
+                    }
+                units[key]["sample_to_bam"][sample] = Path(bam_path)
+    if not units:
+        for method in methods:
+            star_dir = results_dir / method / "star"
+            sample_to_bam: Dict[str, Path] = {}
+            for s in samples:
+                bam = star_dir / f"{s.sample_name}_Aligned.sortedByCoord.out.bam"
+                if bam.exists():
+                    sample_to_bam[s.sample_name] = bam
+            if sample_to_bam:
+                units[(method, "star", "default")] = {
+                    "method": method,
+                    "mapper": "star",
+                    "mapper_option_set": "default",
+                    "sample_to_bam": sample_to_bam,
+                }
+    return [units[k] for k in sorted(units.keys())]
 
 
 def make_bigwig(
@@ -98,21 +145,28 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     samples = read_samples_tsv(samples_tsv)
     methods = methods_override or get_enabled_methods(cfg)
 
-    for method in methods:
-        logger.info("--- BigWigs for method: %s ---", method)
-        star_dir = results_dir / method / "star"
-        bw_dir = results_dir / method / "bigwig"
+    mapping_units = build_mapping_units(results_dir, samples, methods)
+    for unit in mapping_units:
+        method = unit["method"]
+        mapper = unit["mapper"]
+        mapper_opt = unit["mapper_option_set"]
+        logger.info(
+            "--- BigWigs for trim=%s mapper=%s mapper_option=%s ---",
+            method, mapper, mapper_opt,
+        )
+        bw_dir = results_dir / method / "bigwig" / mapper / mapper_opt
         ensure_dirs(bw_dir)
 
-        # Try to load DESeq2 size factors for this method
-        sf_path = results_dir / method / "deseq2" / "size_factors.tsv"
+        # Try to load DESeq2 size factors for this mapping unit.
+        sf_path = results_dir / method / "deseq2" / mapper / mapper_opt / "size_factors.tsv"
         size_factors = load_size_factors(sf_path)
         use_sf = bw_cfg.get("use_deseq2_sizefactors", True) and bool(size_factors)
 
         for s in samples:
-            bam = star_dir / f"{s.sample_name}_Aligned.sortedByCoord.out.bam"
-            if not bam.exists():
-                logger.warning("BAM not found: %s (skipping)", bam)
+            bam = unit["sample_to_bam"].get(s.sample_name)
+            if bam is None or not bam.exists():
+                logger.warning("BAM not found for %s (%s/%s/%s)",
+                               s.sample_name, method, mapper, mapper_opt)
                 continue
 
             # CPM normalised BigWig

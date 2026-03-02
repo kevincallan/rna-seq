@@ -301,7 +301,7 @@ STEPS = {
     2:  ("02_trim_reads",       "Trim reads"),
     3:  ("03_qc_fastqc",       "FastQC"),
     4:  ("04_multiqc",         "MultiQC"),
-    5:  ("05_map_star",        "STAR mapping"),
+    5:  ("05_map_star",        "Read mapping"),
     6:  ("06_bigwig",          "BigWig generation"),
     7:  ("07_featurecounts",   "featureCounts"),
     8:  ("08_filter_matrix",   "Filter count matrix"),

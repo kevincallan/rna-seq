@@ -19,7 +19,7 @@ import logging
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -251,6 +251,56 @@ def parse_fc_summary(summary_path: Path) -> Dict[str, Dict[str, str]]:
     return stats
 
 
+def build_mapping_units(
+    results_dir: Path,
+    samples: list,
+    methods: List[str],
+) -> List[Dict[str, Any]]:
+    """Collect mapping units from mapping_summary.tsv (or legacy STAR layout)."""
+    mapping_summary = results_dir / "mapping_summary.tsv"
+    units: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+
+    if mapping_summary.exists():
+        with open(mapping_summary, encoding="utf-8") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            for row in reader:
+                method = row.get("method") or row.get("trim_method") or ""
+                mapper = row.get("mapper", "star")
+                mapper_opt = row.get("mapper_option_set", "default")
+                sample = row.get("sample", "")
+                bam_path = row.get("bam_path", "")
+                if method not in methods or not sample or not bam_path:
+                    continue
+                key = (method, mapper, mapper_opt)
+                if key not in units:
+                    units[key] = {
+                        "method": method,
+                        "mapper": mapper,
+                        "mapper_option_set": mapper_opt,
+                        "sample_to_bam": {},
+                    }
+                units[key]["sample_to_bam"][sample] = Path(bam_path)
+
+    if not units:
+        # Legacy fallback (single STAR run per trimming method)
+        for method in methods:
+            sample_to_bam: Dict[str, Path] = {}
+            star_dir = results_dir / method / "star"
+            for s in samples:
+                bam = star_dir / f"{s.sample_name}_Aligned.sortedByCoord.out.bam"
+                if bam.exists():
+                    sample_to_bam[s.sample_name] = bam
+            if sample_to_bam:
+                units[(method, "star", "default")] = {
+                    "method": method,
+                    "mapper": "star",
+                    "mapper_option_set": "default",
+                    "sample_to_bam": sample_to_bam,
+                }
+
+    return [units[k] for k in sorted(units.keys())]
+
+
 # =========================================================================
 # Main
 # =========================================================================
@@ -274,23 +324,32 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     logger.info("Counting backend: %s", backend)
 
     all_summary_rows: List[Dict[str, str]] = []
+    mapping_units = build_mapping_units(results_dir, samples, methods)
 
-    for method in methods:
-        logger.info("--- Counting for method: %s ---", method)
-        star_dir = results_dir / method / "star"
-        fc_dir = results_dir / method / "featurecounts"
+    for unit in mapping_units:
+        method = unit["method"]
+        mapper = unit["mapper"]
+        mapper_opt = unit["mapper_option_set"]
+        logger.info(
+            "--- Counting for trim=%s mapper=%s mapper_option=%s ---",
+            method, mapper, mapper_opt,
+        )
+        fc_dir = results_dir / method / "featurecounts" / mapper / mapper_opt
         ensure_dirs(fc_dir)
 
         # Collect BAM files in deterministic order
         bam_files: List[Path] = []
         sample_names: List[str] = []
         for s in samples:
-            bam = star_dir / f"{s.sample_name}_Aligned.sortedByCoord.out.bam"
-            if bam.exists():
+            bam = unit["sample_to_bam"].get(s.sample_name)
+            if bam is not None and bam.exists():
                 bam_files.append(bam)
                 sample_names.append(s.sample_name)
             else:
-                logger.warning("BAM not found: %s", bam)
+                logger.warning(
+                    "BAM not found for trim=%s mapper=%s opt=%s sample=%s",
+                    method, mapper, mapper_opt, s.sample_name,
+                )
 
         if not bam_files:
             logger.error("No BAM files for method '%s', skipping", method)
@@ -337,7 +396,10 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                     )
                     clean_sname = clean_sname.rstrip("_")
                     all_summary_rows.append({
+                        "trim_method": method,
                         "method": method,
+                        "mapper": mapper,
+                        "mapper_option_set": mapper_opt,
                         "option_set": opt_name,
                         "sample": clean_sname,
                         "assigned_reads": count,
@@ -349,7 +411,15 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         with open(fc_summary_path, "w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(
                 fh,
-                fieldnames=["method", "option_set", "sample", "assigned_reads"],
+                fieldnames=[
+                    "trim_method",
+                    "method",
+                    "mapper",
+                    "mapper_option_set",
+                    "option_set",
+                    "sample",
+                    "assigned_reads",
+                ],
                 delimiter="\t",
             )
             writer.writeheader()

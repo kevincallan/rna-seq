@@ -10,6 +10,7 @@ samples -- rule of thumb ~2 reads per sample).
 from __future__ import annotations
 
 import logging
+import csv
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -28,6 +29,29 @@ from src.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def build_mapping_units(results_dir: Path, methods: List[str]) -> List[Dict[str, str]]:
+    """Infer mapping units from mapping_summary.tsv or use STAR legacy fallback."""
+    mapping_summary = results_dir / "mapping_summary.tsv"
+    units: set[tuple[str, str, str]] = set()
+    if mapping_summary.exists():
+        with open(mapping_summary, encoding="utf-8") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            for row in reader:
+                method = row.get("method") or row.get("trim_method") or ""
+                if method not in methods:
+                    continue
+                mapper = row.get("mapper", "star")
+                mapper_opt = row.get("mapper_option_set", "default")
+                units.add((method, mapper, mapper_opt))
+    if not units:
+        for method in methods:
+            units.add((method, "star", "default"))
+    return [
+        {"method": m, "mapper": p, "mapper_option_set": o}
+        for (m, p, o) in sorted(units)
+    ]
 
 
 def filter_matrix(
@@ -112,8 +136,12 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     option_sets = cfg["featurecounts"].get("option_sets", {"default": {}})
     all_stats: List[Dict[str, Any]] = []
 
-    for method in methods:
-        fc_dir = results_dir / method / "featurecounts"
+    mapping_units = build_mapping_units(results_dir, methods)
+    for unit in mapping_units:
+        method = unit["method"]
+        mapper = unit["mapper"]
+        mapper_opt = unit["mapper_option_set"]
+        fc_dir = results_dir / method / "featurecounts" / mapper / mapper_opt
 
         for opt_name in option_sets:
             input_matrix = fc_dir / f"count_matrix_{opt_name}.tsv"
@@ -123,7 +151,10 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
 
             output_matrix = fc_dir / f"clean_matrix_{opt_name}.tsv"
             stats = filter_matrix(input_matrix, output_matrix, threshold)
+            stats["trim_method"] = method
             stats["method"] = method
+            stats["mapper"] = mapper
+            stats["mapper_option_set"] = mapper_opt
             stats["option_set"] = opt_name
             all_stats.append(stats)
 
@@ -131,10 +162,14 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     summary_path = results_dir / "filtering_summary.tsv"
     if all_stats:
         with open(summary_path, "w", encoding="utf-8") as fh:
-            fh.write("method\toption_set\tgenes_in\tgenes_out\tgenes_removed\n")
+            fh.write(
+                "trim_method\tmethod\tmapper\tmapper_option_set\t"
+                "option_set\tgenes_in\tgenes_out\tgenes_removed\n"
+            )
             for s in all_stats:
                 fh.write(
-                    f"{s['method']}\t{s['option_set']}\t"
+                    f"{s['trim_method']}\t{s['method']}\t{s['mapper']}\t"
+                    f"{s['mapper_option_set']}\t{s['option_set']}\t"
                     f"{s['genes_in']}\t{s['genes_out']}\t{s['genes_removed']}\n"
                 )
         logger.info("Filtering summary -> %s", summary_path)

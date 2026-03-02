@@ -47,6 +47,25 @@ def validate_references(cfg: Dict[str, Any]) -> List[str]:
     if genome_idx and not Path(genome_idx).exists():
         errors.append(f"STAR genome index not found: {genome_idx}")
 
+    # Optional mapper-specific indexes
+    mapping_backends = cfg.get("mapping", {}).get("backends", {})
+    star_cfg = mapping_backends.get("star", {})
+    if isinstance(star_cfg, dict) and star_cfg.get("enabled", False):
+        star_idx = star_cfg.get("genome_index", "")
+        if star_idx and not Path(star_idx).exists():
+            errors.append(f"STAR genome index not found (mapping.backends.star): {star_idx}")
+
+    hisat2_cfg = mapping_backends.get("hisat2", {})
+    if isinstance(hisat2_cfg, dict) and hisat2_cfg.get("enabled", False):
+        hisat2_prefix = str(hisat2_cfg.get("index_prefix", "")).strip()
+        if hisat2_prefix:
+            # Accept either .1.ht2 or .1.ht2l variants.
+            ht2_exists = Path(f"{hisat2_prefix}.1.ht2").exists() or Path(f"{hisat2_prefix}.1.ht2l").exists()
+            if not ht2_exists:
+                errors.append(
+                    f"HISAT2 index prefix not found (expected {hisat2_prefix}.1.ht2[ l ]): {hisat2_prefix}"
+                )
+
     gtf = refs.get("gtf", "")
     if gtf and not Path(gtf).exists():
         errors.append(f"GTF annotation not found: {gtf}")
@@ -86,20 +105,35 @@ def validate_tools(cfg: Dict[str, Any]) -> Dict[str, str]:
     methods = get_enabled_methods(cfg)
     versions: Dict[str, str] = {}
 
-    # Always-required compiled tools -- just the mapper
-    required = ["star"]
+    # Always-required compiled tools -- mapper(s)
+    required: List[str] = []
+    mapping_backends = cfg.get("mapping", {}).get("backends", {})
+    enabled_mappers = [
+        name for name, mcfg in mapping_backends.items()
+        if isinstance(mcfg, dict) and mcfg.get("enabled", False)
+    ]
+    if not enabled_mappers:
+        enabled_mappers = ["star"]
+
+    if "star" in enabled_mappers:
+        required.append("star")
+    if "hisat2" in enabled_mappers:
+        required.append("hisat2")
+        # HISAT2 workflow requires samtools sort/index.
+        required.append("samtools")
 
     # These are Python packages but validate they're on PATH if used as CLI
     # (multiqc, cutadapt, bamcoverage are pip-installable)
     required.extend(["fastqc", "multiqc", "bamcoverage"])
 
-    # samtools only needed if pysam is not available
+    # samtools only needed if pysam is not available (except HISAT2, above).
     try:
         import pysam
         versions["pysam"] = pysam.__version__
-        logger.info("  %-16s OK  (v%s -- replaces samtools)", "pysam", pysam.__version__)
+        logger.info("  %-16s OK  (v%s -- replaces samtools index)", "pysam", pysam.__version__)
     except ImportError:
-        required.append("samtools")
+        if "samtools" not in required:
+            required.append("samtools")
 
     # featureCounts only needed if not using htseq backend
     counting_backend = cfg.get("featurecounts", {}).get("backend", "featurecounts")
@@ -124,6 +158,13 @@ def validate_tools(cfg: Dict[str, Any]) -> Dict[str, str]:
         required.append("fastp")
     if "trimmomatic" in methods:
         required.append("trimmomatic")
+
+    # Deduplicate while preserving order
+    dedup_required: List[str] = []
+    for tool in required:
+        if tool not in dedup_required:
+            dedup_required.append(tool)
+    required = dedup_required
 
     # R is only needed for R-based DESeq2 backends
     de_method = cfg.get("deseq2", {}).get("method", "pydeseq2")
@@ -247,7 +288,7 @@ def main(cfg: Dict[str, Any], run_id: str) -> Dict[str, Any]:
     for method in get_enabled_methods(cfg):
         ensure_dirs(
             work_dir / "trimmed" / method,
-            results_dir / method / "star",
+            results_dir / method / "mapping",
             results_dir / method / "featurecounts",
             results_dir / method / "deseq2",
             results_dir / method / "bigwig",

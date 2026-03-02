@@ -7,7 +7,7 @@ A config-driven, end-to-end RNA-seq pipeline for differential expression analysi
 ## Exam Day Quick Start
 
 ```bash
-cd pipeline/
+cd ~/rna-seq-pipeline
 
 # One command -- change only the dataset ID:
 ./py scripts/run_pipeline.py --dataset GSEXXXXX run
@@ -32,7 +32,7 @@ This pipeline takes raw RNA-seq FASTQ files and produces a complete differential
 Raw FASTQs
   --> Quality control (FastQC / MultiQC)
   --> Adapter trimming (cutadapt, with untrimmed baseline)
-  --> Read mapping to reference genome (STAR)
+  --> Read mapping to reference genome (STAR and/or HISAT2 option sets)
   --> Read counting per gene (featureCounts / HTSeq)
   --> Low-expression gene filtering
   --> Differential expression analysis (PyDESeq2)
@@ -208,25 +208,30 @@ trimming:
 results/<run_id>/
   run_manifest.json                          # Reproducibility: config hash, tool versions
   samples.tsv                                # Design table (sample -> condition -> replicate)
-  mapping_summary.tsv                        # STAR mapping rates per sample/method
-  featurecounts_summary.tsv                  # Assigned reads per option set
-  filtering_summary.tsv                      # Genes before/after filtering
-  de_summary.tsv                             # DEG counts per method/contrast
+  mapping_summary.tsv                        # Mapping rates per trim/mapping approach/sample
+  featurecounts_summary.tsv                  # Assigned reads per trim/mapping/count option set
+  filtering_summary.tsv                      # Genes before/after filtering (all dimensions)
+  de_summary.tsv                             # DEG counts per trim/mapping/contrast
   reports/
     report.md / report.html                  # Combined final report
-    method_comparison.md                     # Trimming method comparison
+    method_comparison.md                     # Trimming + mapper + parameter comparison
     multiqc_raw/multiqc_report.html          # Raw reads QC
     multiqc_<method>/multiqc_report.html     # Per-method QC
   <method>/                                  # e.g. none/, cutadapt/
-    star/<sample>_Aligned.sortedByCoord.out.bam
-    featurecounts/count_matrix_<set>.tsv     # Raw count matrices
-    featurecounts/clean_matrix_<set>.tsv     # Filtered count matrices
-    deseq2/<contrast>/
+    mapping/<mapper>/<mapper_option>/<sample>...
+    featurecounts/<mapper>/<mapper_option>/count_matrix_<set>.tsv
+    featurecounts/<mapper>/<mapper_option>/clean_matrix_<set>.tsv
+    deseq2/<mapper>/<mapper_option>/<contrast>/
       de_all.tsv                             # All genes: log2FC, pvalue, padj
       de_significant.tsv                     # FDR-significant genes only
       normalized_counts.tsv                  # DESeq2-normalised count matrix
       size_factors.tsv                       # DESeq2 size factors
-      top_genes_for_enrichment.txt           # Gene IDs for enrichment tools
+      top_genes_for_enrichment.txt           # All significant genes
+      top_up_genes_for_enrichment.txt        # Significant upregulated genes only
+      top_down_genes_for_enrichment.txt      # Significant downregulated genes only
+      top200_genes_for_enrichment.txt        # Capped list for web tools
+      top200_up_genes_for_enrichment.txt     # Capped up list
+      top200_down_genes_for_enrichment.txt   # Capped down list
       pca.pdf                                # PCA plot
       ma_plot.pdf                            # MA plot
       volcano.pdf                            # Volcano plot
@@ -266,12 +271,14 @@ Plots log2 fold change (x) against statistical significance as -log10(padj) (y).
 
 ### Method comparison (`method_comparison.md`)
 
-Compares trimming methods on:
+Compares analysis units (trim method + mapper + mapper option) on:
 - **Mapping rates**: Higher is generally better, but very high rates may indicate reference contamination
+- **Mapper option impact**: Mean unique mapping percentage across mapper settings
 - **Assigned reads**: Fraction of mapped reads that overlap annotated features
-- **Count correlations**: Pearson r between normalised counts from different methods (expect > 0.99)
-- **DEG overlap**: Jaccard similarity of significant gene sets. High overlap = robust results
-- **Method-sensitive genes**: Genes whose significance flips between methods -- these findings are fragile and should be reported cautiously
+- **featureCounts option impact**: Delta vs default counting stringency
+- **Count correlations**: Pearson r between normalised counts from different analysis units
+- **DEG overlap**: Jaccard-style overlap of significant gene sets
+- **Method-sensitive genes**: Genes whose significance flips between units -- these findings are fragile and should be reported cautiously
 
 ### What the results mean biologically
 
@@ -285,7 +292,11 @@ Compares trimming methods on:
 
 ## Functional Enrichment Analysis
 
-The pipeline exports `top_genes_for_enrichment.txt` -- a plain-text list of significant gene IDs (one per line), ready to paste into external enrichment tools.
+The pipeline exports multiple enrichment-ready lists (one gene ID per line):
+- `top_genes_for_enrichment.txt` (all significant DEGs)
+- `top_up_genes_for_enrichment.txt` (upregulated only)
+- `top_down_genes_for_enrichment.txt` (downregulated only)
+- `top200_*` variants for tools with practical upload-size limits
 
 ### Recommended tools
 
@@ -304,14 +315,16 @@ The pipeline exports `top_genes_for_enrichment.txt` -- a plain-text list of sign
    - Provides PCA, clustering, enrichment, and pathway analysis in one interface
    - Useful for exploratory analysis beyond what this pipeline produces
 
-### Enrichment workflow
+### Enrichment workflow (recommended and reproducible)
 
-1. Locate `top_genes_for_enrichment.txt` in `results/<run_id>/<method>/deseq2/<contrast>/`
-2. Open g:Profiler or Enrichr in a browser
-3. Paste the gene list
-4. Select the correct organism (e.g., *Mus musculus* for mouse)
-5. Run the analysis and note the top enriched terms
-6. Include 1-2 key findings in your report (e.g., "Upregulated genes were enriched for neuronal differentiation pathways (GO:0030182, padj = 2.3e-8)")
+1. Choose the exact analysis unit path:
+   `results/<run_id>/<trim_method>/deseq2/<mapper>/<mapper_option>/<contrast>/`
+2. Use **upregulated genes** (`top_up_genes_for_enrichment.txt`) for activated pathways.
+3. Use **downregulated genes** (`top_down_genes_for_enrichment.txt`) for repressed pathways.
+4. If the tool is slow or rejects long lists, use `top200_*.txt` files.
+5. In g:Profiler/Enrichr, set organism explicitly (for example *Mus musculus*).
+6. Save top terms + adjusted p-values and include 1-2 pathway findings in the report.
+7. For iDEP, upload `normalized_counts.tsv` from the same analysis unit to keep comparisons consistent.
 
 ### Interpreting enrichment results
 
@@ -333,21 +346,28 @@ Compare `none/` and `cutadapt/` results:
 - Does it change which genes are called DE? (Check `method_comparison.md`)
 - Implication: Adapter contamination inflates multi-mapping; trimming improves specificity
 
-### 2. featureCounts stringency
+### 2. Mapping approach / mapper option
 
-Compare the three option sets (default, strict, stringent):
+Compare mapper settings (for example STAR default vs STAR strict_unique):
+- Stricter mapping often raises confidence but can reduce mapped read counts.
+- Check downstream impact on assigned reads and DEG overlap.
+- Report whether biological conclusions are stable across mapper settings.
+
+### 3. featureCounts stringency
+
+Compare count option sets (default, strict, stringent):
 - `strict` requires both mates mapped and proper pairing -- removes ambiguous fragments
 - `stringent` (Q=255) keeps only uniquely mapped reads -- most conservative
-- Implication: Stricter counting reduces noise but may lose signal for genes in repetitive regions
+- Implication: Stricter counting reduces noise but may lose signal for repetitive loci
 
-### 3. FDR threshold sensitivity
+### 4. FDR threshold sensitivity
 
 The default threshold is 0.05. Discuss what happens at 0.01 or 0.1:
 - More stringent = fewer DEGs but higher confidence
 - Less stringent = more DEGs but more false positives
 - This can be explored post-hoc from `de_all.tsv` without re-running the pipeline
 
-### 4. Replicate count
+### 5. Replicate count
 
 Using more than the minimum 2 replicates increases statistical power. The pipeline automatically uses all replicates matching the subset filter. More replicates = narrower confidence intervals = more DEGs detected.
 
@@ -365,7 +385,7 @@ Using more than the minimum 2 replicates increases statistical power. The pipeli
 3. **Run**:
 
 ```bash
-cd pipeline/
+cd ~/rna-seq-pipeline
 ./py scripts/run_pipeline.py --dataset GSE12345 run
 ```
 

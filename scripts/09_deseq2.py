@@ -179,13 +179,29 @@ def run_pydeseq2(
     logger.info("  Significant DEGs (FDR < %s): %d (up=%d, down=%d)",
                 fdr, len(sig), n_up, n_down)
 
-    # --- Gene list for functional enrichment --------------------------------
+    # --- Gene lists for functional enrichment --------------------------------
+    sig_genes = sig.index.tolist()
+    up_genes = sig.loc[sig["log2FoldChange"] > 0].index.tolist()
+    down_genes = sig.loc[sig["log2FoldChange"] < 0].index.tolist()
+
     enrichment_path = out_dir / "top_genes_for_enrichment.txt"
-    enrichment_path.write_text(
-        "\n".join(sig.index.tolist()), encoding="utf-8",
+    enrichment_up_path = out_dir / "top_up_genes_for_enrichment.txt"
+    enrichment_down_path = out_dir / "top_down_genes_for_enrichment.txt"
+    enrichment_top200_path = out_dir / "top200_genes_for_enrichment.txt"
+    enrichment_top200_up_path = out_dir / "top200_up_genes_for_enrichment.txt"
+    enrichment_top200_down_path = out_dir / "top200_down_genes_for_enrichment.txt"
+
+    enrichment_path.write_text("\n".join(sig_genes), encoding="utf-8")
+    enrichment_up_path.write_text("\n".join(up_genes), encoding="utf-8")
+    enrichment_down_path.write_text("\n".join(down_genes), encoding="utf-8")
+    enrichment_top200_path.write_text("\n".join(sig_genes[:200]), encoding="utf-8")
+    enrichment_top200_up_path.write_text("\n".join(up_genes[:200]), encoding="utf-8")
+    enrichment_top200_down_path.write_text("\n".join(down_genes[:200]), encoding="utf-8")
+
+    logger.info(
+        "  Enrichment gene lists written (all=%d, up=%d, down=%d) -> %s",
+        len(sig_genes), len(up_genes), len(down_genes), out_dir,
     )
-    logger.info("  Gene list for enrichment: %d genes -> %s",
-                len(sig), enrichment_path)
 
     # --- PCA plot --------------------------------------------------------
     _pydeseq2_pca_plot(dds, metadata, contrast_name, out_dir)
@@ -465,6 +481,29 @@ def count_degs(results_path: Path, fdr: float = 0.05) -> Dict[str, int]:
     }
 
 
+def build_mapping_units(results_dir: Path, methods: List[str]) -> List[Dict[str, str]]:
+    """Infer mapping units from mapping_summary.tsv or use STAR legacy fallback."""
+    units: set[tuple[str, str, str]] = set()
+    mapping_summary = results_dir / "mapping_summary.tsv"
+    if mapping_summary.exists():
+        with open(mapping_summary, encoding="utf-8") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            for row in reader:
+                method = row.get("method") or row.get("trim_method") or ""
+                if method not in methods:
+                    continue
+                mapper = row.get("mapper", "star")
+                mapper_opt = row.get("mapper_option_set", "default")
+                units.add((method, mapper, mapper_opt))
+    if not units:
+        for method in methods:
+            units.add((method, "star", "default"))
+    return [
+        {"method": m, "mapper": p, "mapper_option_set": o}
+        for (m, p, o) in sorted(units)
+    ]
+
+
 # =========================================================================
 # Main
 # =========================================================================
@@ -493,17 +532,29 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
 
     all_de_stats: List[Dict[str, Any]] = []
 
-    for method in methods:
-        logger.info("--- DE for trimming method: %s ---", method)
-        fc_dir = results_dir / method / "featurecounts"
-        de_dir = results_dir / method / "deseq2"
+    mapping_units = build_mapping_units(results_dir, methods)
+    for unit in mapping_units:
+        method = unit["method"]
+        mapper = unit["mapper"]
+        mapper_opt = unit["mapper_option_set"]
+        logger.info(
+            "--- DE for trim=%s mapper=%s mapper_option=%s ---",
+            method, mapper, mapper_opt,
+        )
+        fc_dir = results_dir / method / "featurecounts" / mapper / mapper_opt
+        de_dir = results_dir / method / "deseq2" / mapper / mapper_opt
         ensure_dirs(de_dir)
 
         # Count matrix
         count_matrix = fc_dir / f"clean_matrix_{primary_opt}.tsv"
         if not count_matrix.exists():
-            logger.error("Count matrix not found: %s", count_matrix)
-            continue
+            # Legacy fallback
+            legacy_count_matrix = results_dir / method / "featurecounts" / f"clean_matrix_{primary_opt}.tsv"
+            if legacy_count_matrix.exists():
+                count_matrix = legacy_count_matrix
+            else:
+                logger.error("Count matrix not found: %s", count_matrix)
+                continue
 
         # Write sample description for R backends
         sample_desc = de_dir / "sample_description.txt"
@@ -516,7 +567,11 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
             de_all = de_dir / "DESeq2.de_all.tsv"
             if de_all.exists():
                 stats = count_degs(de_all, fdr)
+                stats["trim_method"] = method
                 stats["method"] = method
+                stats["mapper"] = mapper
+                stats["mapper_option_set"] = mapper_opt
+                stats["count_option_set"] = primary_opt
                 stats["contrast"] = "auto"
                 all_de_stats.append(stats)
 
@@ -534,7 +589,11 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                 )
                 de_all = contrast_dir / "de_all.tsv"
                 stats = count_degs(de_all, fdr)
+                stats["trim_method"] = method
                 stats["method"] = method
+                stats["mapper"] = mapper
+                stats["mapper_option_set"] = mapper_opt
+                stats["count_option_set"] = primary_opt
                 stats["contrast"] = cname
                 all_de_stats.append(stats)
 
@@ -552,7 +611,11 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                 )
                 de_all = contrast_dir / "de_all.tsv"
                 stats = count_degs(de_all, fdr)
+                stats["trim_method"] = method
                 stats["method"] = method
+                stats["mapper"] = mapper
+                stats["mapper_option_set"] = mapper_opt
+                stats["count_option_set"] = primary_opt
                 stats["contrast"] = cname
                 all_de_stats.append(stats)
 
@@ -566,8 +629,18 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     de_summary_path = results_dir / "de_summary.tsv"
     if all_de_stats:
         with open(de_summary_path, "w", newline="", encoding="utf-8") as fh:
-            fields = ["method", "contrast", "total_tested",
-                      "sig_up", "sig_down", "sig_total"]
+            fields = [
+                "trim_method",
+                "method",
+                "mapper",
+                "mapper_option_set",
+                "count_option_set",
+                "contrast",
+                "total_tested",
+                "sig_up",
+                "sig_down",
+                "sig_total",
+            ]
             writer = csv.DictWriter(fh, fieldnames=fields, delimiter="\t",
                                     extrasaction="ignore")
             writer.writeheader()
