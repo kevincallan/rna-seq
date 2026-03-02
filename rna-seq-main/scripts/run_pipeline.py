@@ -151,6 +151,20 @@ def _validate_data(
 
     dataset_dir = cfg["data"]["fastq_dir"]
     metadata_path = cfg["data"]["metadata_csv"]
+    data_root = cfg.get("_data_root") or str(Path(dataset_dir).parent)
+
+    # List available data under data root (helps when path is wrong)
+    data_root_path = Path(data_root)
+    print(f"Data root:    {data_root}")
+    if data_root_path.exists():
+        subdirs = sorted(d.name for d in data_root_path.iterdir() if d.is_dir())
+        print(f"  Available datasets: {', '.join(subdirs) if subdirs else '(none)'}")
+        indices_path = data_root_path / "indices"
+        if indices_path.exists():
+            genomes = sorted(d.name for d in indices_path.iterdir() if d.is_dir())
+            print(f"  Reference genomes:  {', '.join(genomes) if genomes else '(none)'}")
+    else:
+        print(f"  WARNING: Data root not found: {data_root}")
 
     print(f"Dataset dir:  {dataset_dir}")
     print(f"Metadata:     {metadata_path}")
