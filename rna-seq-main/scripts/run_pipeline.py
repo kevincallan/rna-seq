@@ -82,6 +82,7 @@ def _check_runtime() -> None:
         print(f"         Use:    ./py scripts/run_pipeline.py ...")
 
     missing: List[str] = []
+    # HTSeq only required when featurecounts.backend is "htseq"; default is featurecounts
     for pkg, import_name in [
         ("pydeseq2", "pydeseq2"),
         ("pandas", "pandas"),
@@ -91,7 +92,6 @@ def _check_runtime() -> None:
         ("matplotlib", "matplotlib"),
         ("pyyaml", "yaml"),
         ("pysam", "pysam"),
-        ("HTSeq", "HTSeq"),
     ]:
         try:
             mod = __import__(import_name)
@@ -135,8 +135,16 @@ def _apply_data_pointer(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
         cfg["project"]["results_dir"] = args.outdir
 
 
-def _validate_data(cfg: Dict[str, Any], strict: bool = False) -> None:
-    """Confirm data directories, metadata, FASTQs, and references exist."""
+def _validate_data(
+    cfg: Dict[str, Any],
+    strict: bool = False,
+    steps: Optional[List[int]] = None,
+) -> None:
+    """Confirm data directories, metadata, FASTQs, and references exist.
+
+    References (STAR index, GTF) are only required when running steps 5+.
+    QC-only runs (steps 0-4) can proceed without them.
+    """
     print("=" * 60)
     print("Data validation")
     print("=" * 60)
@@ -156,12 +164,18 @@ def _validate_data(cfg: Dict[str, Any], strict: bool = False) -> None:
     if not Path(metadata_path).is_file():
         errors.append(f"Metadata CSV not found: {metadata_path}")
 
-    ref_idx = cfg["references"]["genome_index"]
-    ref_gtf = cfg["references"]["gtf"]
-    if not Path(ref_idx).exists():
-        errors.append(f"STAR genome index not found: {ref_idx}")
-    if not Path(ref_gtf).exists():
-        errors.append(f"GTF annotation not found: {ref_gtf}")
+    # References only needed for mapping/counting/DE (steps 5-9)
+    steps_needing_refs = {5, 6, 7, 8, 9}
+    steps_to_run = set(steps) if steps else steps_needing_refs
+    if steps_to_run & steps_needing_refs:
+        ref_idx = cfg["references"]["genome_index"]
+        ref_gtf = cfg["references"]["gtf"]
+        if not Path(ref_idx).exists():
+            errors.append(f"STAR genome index not found: {ref_idx}")
+        if not Path(ref_gtf).exists():
+            errors.append(f"GTF annotation not found: {ref_gtf}")
+    else:
+        print("  (Skipping reference check -- steps 0-4 only, no mapping/counting)")
 
     if errors:
         for e in errors:
@@ -433,7 +447,8 @@ def main() -> None:
     setup_logging(cfg["project"]["logs_dir"], run_id)
 
     # --- Validate data paths before heavy compute ---------------------------
-    _validate_data(cfg, strict=args.strict)
+    steps_to_run = getattr(args, "steps", None) or ALL_STEPS
+    _validate_data(cfg, strict=args.strict, steps=steps_to_run)
 
     # Pre-enrich config with runtime paths (step 00 will enrich further)
     cfg["_run_id"] = run_id
