@@ -107,6 +107,36 @@ def _check_runtime() -> None:
     print("=" * 60)
 
 
+def _find_star_index(genome_dir: Path) -> str:
+    """Auto-discover STAR index inside a genome directory.
+
+    Looks for a directory containing Genome, SA, SAindex (STAR index files).
+    Tries: genome_dir/STAR, genome_dir/star, genome_dir itself.
+    """
+    for candidate in [genome_dir / "STAR", genome_dir / "star", genome_dir]:
+        if (candidate / "Genome").exists() or (candidate / "SA").exists():
+            return str(candidate)
+    return str(genome_dir / "STAR")
+
+
+def _find_gtf(genome_dir: Path, build: str) -> str:
+    """Auto-discover GTF file inside a genome directory."""
+    for pattern in [f"{build}.gtf", "*.gtf", f"{build}.gtf.gz"]:
+        matches = sorted(genome_dir.glob(pattern))
+        if matches:
+            return str(matches[0])
+    return str(genome_dir / f"{build}.gtf")
+
+
+def _find_fasta(genome_dir: Path, build: str) -> str:
+    """Auto-discover genome FASTA inside a genome directory."""
+    for pattern in [f"{build}.fa", f"{build}.fasta", "*.fa", "*.fasta"]:
+        matches = sorted(genome_dir.glob(pattern))
+        if matches:
+            return str(matches[0])
+    return str(genome_dir / f"{build}.fa")
+
+
 def _apply_data_pointer(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
     """Override config paths based on --dataset / --species CLI flags."""
     if args.dataset:
@@ -127,9 +157,9 @@ def _apply_data_pointer(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
             )
         sp = SPECIES_MAP[args.species]
         idx_base = Path(args.data_root) / "indices" / sp["genome"]
-        cfg["references"]["genome_index"] = str(idx_base / "STAR")
-        cfg["references"]["gtf"] = str(idx_base / f"{sp['build']}.gtf")
-        cfg["references"]["genome_fasta"] = str(idx_base / f"{sp['build']}.fa")
+        cfg["references"]["genome_index"] = _find_star_index(idx_base)
+        cfg["references"]["gtf"] = _find_gtf(idx_base, sp["build"])
+        cfg["references"]["genome_fasta"] = _find_fasta(idx_base, sp["build"])
 
     if args.outdir:
         cfg["project"]["results_dir"] = args.outdir
@@ -186,6 +216,10 @@ def _validate_data(
         ref_gtf = cfg["references"]["gtf"]
         if not Path(ref_idx).exists():
             errors.append(f"STAR genome index not found: {ref_idx}")
+            parent = Path(ref_idx).parent
+            if parent.exists():
+                contents = sorted(p.name for p in parent.iterdir())[:15]
+                print(f"  Contents of {parent}: {', '.join(contents)}")
         if not Path(ref_gtf).exists():
             errors.append(f"GTF annotation not found: {ref_gtf}")
     else:
