@@ -9,6 +9,7 @@ submission or reference.
 
 from __future__ import annotations
 
+import csv
 import logging
 import sys
 from pathlib import Path
@@ -30,14 +31,47 @@ from src.utils import (
 logger = logging.getLogger(__name__)
 
 
-def main(cfg: Dict[str, Any]) -> None:
+def _infer_methods_from_outputs(results_dir: Path, cfg: Dict[str, Any]) -> List[str]:
+    """Infer methods that actually have outputs for this run."""
+    methods: set[str] = set()
+
+    # Prefer methods observed in summaries
+    for summary in ["mapping_summary.tsv", "featurecounts_summary.tsv", "de_summary.tsv"]:
+        p = results_dir / summary
+        if not p.exists():
+            continue
+        with open(p, encoding="utf-8") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            for row in reader:
+                m = row.get("method")
+                if m:
+                    methods.add(m)
+
+    # Fallback: detect method dirs in results tree
+    if not methods:
+        for p in results_dir.iterdir():
+            if not p.is_dir():
+                continue
+            if p.name in {"reports"}:
+                continue
+            if (p / "star").exists() or (p / "deseq2").exists() or (p / "qc").exists():
+                methods.add(p.name)
+
+    # Final fallback: config-enabled methods
+    if not methods:
+        methods.update(get_enabled_methods(cfg))
+
+    return sorted(methods)
+
+
+def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None:
     """Execute step 11."""
     logger.info("=" * 60)
     logger.info("STEP 11: Generate report")
     logger.info("=" * 60)
 
     results_dir = Path(cfg["_results_dir"])
-    methods = get_enabled_methods(cfg)
+    methods = methods_override or _infer_methods_from_outputs(results_dir, cfg)
     comparisons = cfg.get("comparisons", [])
     project_name = cfg["project"]["name"]
 
@@ -178,6 +212,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Step 11: Generate report")
     parser.add_argument("--config", required=True)
     parser.add_argument("--run-id", default=None)
+    parser.add_argument("--methods", nargs="*", default=None)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -187,4 +222,4 @@ if __name__ == "__main__":
     cfg["_results_dir"] = str(resolve_results_dir(cfg, run_id))
     cfg["_work_dir"] = str(resolve_work_dir(cfg))
 
-    main(cfg)
+    main(cfg, methods_override=args.methods)

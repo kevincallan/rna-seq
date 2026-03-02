@@ -380,7 +380,7 @@ def run_pipeline(
             elif step_num == 10:
                 mod.main(cfg, methods_override=methods_override)
             elif step_num == 11:
-                mod.main(cfg)
+                mod.main(cfg, methods_override=methods_override)
             else:
                 mod.main(cfg)
 
