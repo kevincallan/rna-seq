@@ -40,6 +40,8 @@ column_mapping:
 
 # -- Subset filters -----------------------------------------------------------
 # EXAM: filter to RNA-Seq rows; add extra filters if the CSV has mixed assays.
+# To use an allocated subset: run with --dataset <allocated_folder>, or add a
+# filter (e.g. exam: {...}) and set active_subset: "exam".
 subset_filters:
   default:
     "Assay Type": "RNA-Seq"

@@ -39,6 +39,10 @@ column_mapping:
 
 # -- Subset filters -----------------------------------------------------------
 # All 6 rows are RNA-Seq; no further filtering needed.
+#
+# To use an exam-allocated subset: run with --dataset <allocated_folder>
+# (that folder has its own metadata.csv). Or add a named filter below and set
+# active_subset to it (e.g. active_subset: "exam").
 subset_filters:
   default:
     "Assay Type": "RNA-Seq"
