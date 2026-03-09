@@ -157,6 +157,15 @@ featurecounts:
       P: true
       C: true
       Q: 255
+    multimapper:
+      label: "Multi-mapper aware (M+fraction)"
+      M: true
+      fraction: true
+      B: false
+      P: false
+      C: false
+      Q: 0
+      extra_args: ""
       extra_args: ""
 
 # -- Matrix filtering ---------------------------------------------------------

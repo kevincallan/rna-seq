@@ -212,6 +212,15 @@ featurecounts:
       C: true
       Q: 255                   # unique mappers only (STAR convention)
       extra_args: ""
+    multimapper:
+      label: "Multi-mapper aware (M+fraction)"
+      M: true                  # count multi-mapping reads
+      fraction: true           # fractional counting (1/N per alignment)
+      B: false
+      P: false
+      C: false
+      Q: 0
+      extra_args: ""
 
 # -- Matrix filtering ---------------------------------------------------------
 filtering:

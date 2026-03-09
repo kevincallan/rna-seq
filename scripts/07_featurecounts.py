@@ -76,6 +76,10 @@ def run_featurecounts(
         cmd.append("-P")
     if option_set.get("C", False):
         cmd.append("-C")
+    if option_set.get("M", False):
+        cmd.append("-M")
+    if option_set.get("fraction", False):
+        cmd.append("--fraction")
     q_val = option_set.get("Q", 0)
     if q_val and int(q_val) > 0:
         cmd.extend(["-Q", str(q_val)])
@@ -423,43 +427,54 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                 clean_counts = fc_dir / f"count_matrix_{opt_name}.tsv"
                 clean_count_matrix(raw_counts, clean_counts, samples)
 
-                # Parse summary
+                # Parse summary — capture ALL status categories
                 summary_file = Path(str(raw_counts) + ".summary")
                 summary = parse_fc_summary(summary_file)
 
-                assigned = summary.get("Assigned", {})
-                for sname, count in assigned.items():
-                    clean_sname = Path(sname).name
+                if summary:
+                    first_status = next(iter(summary.values()))
+                    raw_sample_names = list(first_status.keys())
+                else:
+                    raw_sample_names = []
+
+                for raw_sname in raw_sample_names:
+                    clean_sname = Path(raw_sname).name
                     clean_sname = re.sub(
                         r"_?Aligned\.sortedByCoord\.out\.bam$", "", clean_sname
                     )
                     clean_sname = clean_sname.rstrip("_")
-                    all_summary_rows.append({
+                    row_data: Dict[str, str] = {
                         "trim_method": method,
-                        "method": method,
                         "mapper": mapper,
                         "mapper_option_set": mapper_opt,
                         "option_set": opt_name,
                         "sample": clean_sname,
-                        "assigned_reads": count,
-                    })
+                    }
+                    for status, sname_vals in summary.items():
+                        col = status.replace(" ", "_")
+                        row_data[col] = sname_vals.get(raw_sname, "0")
+                    all_summary_rows.append(row_data)
 
-    # Write featureCounts summary
+    # Write featureCounts summary with all status categories
     fc_summary_path = results_dir / "featurecounts_summary.tsv"
     if all_summary_rows:
+        key_cols = [
+            "trim_method", "mapper", "mapper_option_set",
+            "option_set", "sample",
+        ]
+        stat_cols = sorted(
+            {k for row in all_summary_rows for k in row if k not in key_cols}
+        )
+        # Put Assigned first among stat columns
+        if "Assigned" in stat_cols:
+            stat_cols.remove("Assigned")
+            stat_cols = ["Assigned"] + stat_cols
+        fieldnames = key_cols + stat_cols
+
         with open(fc_summary_path, "w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(
-                fh,
-                fieldnames=[
-                    "trim_method",
-                    "method",
-                    "mapper",
-                    "mapper_option_set",
-                    "option_set",
-                    "sample",
-                    "assigned_reads",
-                ],
-                delimiter="\t",
+                fh, fieldnames=fieldnames, delimiter="\t",
+                extrasaction="ignore",
             )
             writer.writeheader()
             for row in all_summary_rows:
