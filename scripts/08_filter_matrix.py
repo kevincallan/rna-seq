@@ -152,7 +152,6 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
             output_matrix = fc_dir / f"clean_matrix_{opt_name}.tsv"
             stats = filter_matrix(input_matrix, output_matrix, threshold)
             stats["trim_method"] = method
-            stats["method"] = method
             stats["mapper"] = mapper
             stats["mapper_option_set"] = mapper_opt
             stats["option_set"] = opt_name
@@ -163,12 +162,12 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     if all_stats:
         with open(summary_path, "w", encoding="utf-8") as fh:
             fh.write(
-                "trim_method\tmethod\tmapper\tmapper_option_set\t"
+                "trim_method\tmapper\tmapper_option_set\t"
                 "option_set\tgenes_in\tgenes_out\tgenes_removed\n"
             )
             for s in all_stats:
                 fh.write(
-                    f"{s['trim_method']}\t{s['method']}\t{s['mapper']}\t"
+                    f"{s['trim_method']}\t{s['mapper']}\t"
                     f"{s['mapper_option_set']}\t{s['option_set']}\t"
                     f"{s['genes_in']}\t{s['genes_out']}\t{s['genes_removed']}\n"
                 )
