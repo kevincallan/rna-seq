@@ -240,6 +240,36 @@ results/<run_id>/
 
 ---
 
+## Understanding the QC Reports (raw vs none vs cutadapt)
+
+The pipeline generates three sets of MultiQC reports at different stages:
+
+| Report | What it contains | Purpose |
+|--------|-----------------|---------|
+| `multiqc_raw` | QC on original FASTQs, before any processing | Baseline: assess sequencing quality, adapter contamination, GC bias |
+| `multiqc_none` | QC on the "no-trim" pass-through reads | Identical to raw (reads are symlinked). Carried through pipeline for comparison |
+| `multiqc_cutadapt` | QC on reads after adapter trimming + quality filtering | Shows the effect of trimming |
+
+### What to compare in the reports
+
+| Metric | Raw / None | Cutadapt | Interpretation |
+|--------|-----------|----------|----------------|
+| Adapter content | May show adapter signal at 3' end | Should be flat/clean | Trimming removed adapter sequences |
+| Per-base quality | May dip at 3' end | More uniform | Low-quality tails were trimmed |
+| Sequence length | Fixed (e.g. 150 bp) | Distribution (some shorter) | Reads shortened by trimming |
+| Total sequences | Same | Slightly fewer | Reads below `min_length` were dropped |
+| GC content | Same | Same | Trimming does not affect GC composition |
+
+### Why "none" exists as a method
+
+`none` is not a processing method -- it is a **baseline control**. By running untrimmed reads through the full pipeline (mapping, counting, DE), you can answer: *"Did trimming actually improve my results?"*. Compare mapping rates, assigned reads, and DEG counts between `none` and `cutadapt` in `method_comparison.md`.
+
+### For the report
+
+Note whether adapter contamination was visible in the raw data, whether cutadapt cleaned it, and whether this changed downstream mapping rates or DE gene counts. This demonstrates awareness of preprocessing effects on results.
+
+---
+
 ## Interpreting the Results
 
 ### DE results table (`de_all.tsv`, `de_significant.tsv`)
@@ -408,37 +438,38 @@ cd ~/rna-seq-pipeline
 ## Repository Structure
 
 ```
-pipeline/
-  py                           # Interpreter wrapper (./py ensures correct Python)
-  Makefile                     # Convenience targets (make run, make qc, etc.)
-  README.md                    # This file
-  config/
-    config.yaml                # ALL configuration
-  env/
-    environment.yml            # Conda environment spec
-    requirements.txt           # pip requirements
-  src/
-    utils.py                   # Logging, subprocess, config loading
-    metadata.py                # CSV parsing, design table, symlinks
-    reporting.py               # Markdown/HTML report builder
-  scripts/
-    run_pipeline.py            # Orchestrator
-    00_validate_env.py         # Environment validation
-    01_prepare_samples.py      # Metadata parsing + sample prep
-    02_trim_reads.py           # Read trimming
-    03_qc_fastqc.py            # FastQC
-    04_multiqc.py              # MultiQC
-    05_map_star.py             # STAR alignment
-    06_bigwig.py               # Coverage tracks
-    07_featurecounts.py        # Read counting
-    08_filter_matrix.py        # Low-expression filtering
-    09_deseq2.py               # Differential expression + plots
-    10_compare_methods.py      # Method comparison
-    11_make_report.py          # Report generation
-    deseq2_run.R               # R DESeq2 backend (optional)
-  tests/
-    test_metadata.py
-    test_naming.py
+py                               # Interpreter wrapper (./py ensures correct Python)
+Makefile                         # Convenience targets (make run, make qc, etc.)
+README.md                        # This file
+config/
+  config.yaml                    # Mouse GSE48519 configuration
+  config_GSE104853.yaml          # Human miRNA-125a configuration (worked example)
+  config_template.yaml           # Exam-day blank template (copy + fill in)
+env/
+  environment.yml                # Conda environment spec
+  requirements.txt               # pip requirements
+src/
+  utils.py                       # Logging, subprocess, config loading
+  metadata.py                    # CSV parsing, design table, symlinks
+  reporting.py                   # Markdown/HTML report builder
+scripts/
+  run_pipeline.py                # Orchestrator
+  inspect_metadata.py            # Metadata CSV inspector (exam-day helper)
+  00_validate_env.py             # Environment validation
+  01_prepare_samples.py          # Metadata parsing + sample prep
+  02_trim_reads.py               # Read trimming
+  03_qc_fastqc.py                # FastQC
+  04_multiqc.py                  # MultiQC
+  05_map_star.py                 # Read mapping (STAR + optional HISAT2)
+  06_bigwig.py                   # Coverage tracks
+  07_featurecounts.py            # Read counting (with optional GTF filtering)
+  08_filter_matrix.py            # Low-expression filtering
+  09_deseq2.py                   # Differential expression + plots + enrichment lists
+  10_compare_methods.py          # Method / parameter comparison
+  11_make_report.py              # Report generation (includes IGV guide + enrichment checklist)
+tests/
+  test_metadata.py
+  test_naming.py
 ```
 
 ---
@@ -460,6 +491,31 @@ conda env create -f env/environment.yml
 # Or pip (Python packages only; system tools must be installed separately):
 ./py -m pip install -r env/requirements.txt
 ```
+
+---
+
+## Troubleshooting and Known Gotchas
+
+### Tool output goes to stdout vs stderr
+
+Different bioinformatics tools write their summary output to different streams:
+
+| Tool | Summary output | Implication |
+|------|---------------|-------------|
+| cutadapt | **stdout** | Log parser must search stdout (not just stderr) |
+| STAR | **Log.final.out** file | Parsed from file, not from process output |
+| featureCounts | **stderr** + `.summary` file | Metrics parsed from the `.summary` sidecar file |
+| FastQC / MultiQC | HTML reports on disk | No stream parsing needed |
+
+The pipeline handles all of these automatically, but if you add new tools or see `N/A` in summary tables, check whether the tool writes its stats to stdout, stderr, or a sidecar file.
+
+### Common issues
+
+- **`./py: No such file or directory`**: You are in the wrong directory. Run `cd ~/rna-seq-pipeline`.
+- **`FATAL: Missing packages`**: The JupyterHub kernel is missing a library. Contact the lecturer or check `./py -m pip list`.
+- **`FATAL: path(s) not found`**: The `--dataset` or `--species` argument is wrong. Run the pipeline without `--species` first and check the printed data root listing.
+- **featureCounts "Paired-end reads in single-end library"**: The pipeline auto-detects paired-end from the config `layout` field. Make sure `data.layout` in your config matches the actual library type.
+- **Trimming summary shows N/A**: If cutadapt metrics show N/A, the version may have changed its output format. Check `results/<run_id>/cutadapt/qc/*.cutadapt.log` for the raw log.
 
 ---
 
