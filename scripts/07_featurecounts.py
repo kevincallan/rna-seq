@@ -301,6 +301,45 @@ def build_mapping_units(
     return [units[k] for k in sorted(units.keys())]
 
 
+def _prepare_gtf(cfg: Dict[str, Any], results_dir: Path) -> str:
+    """Return the GTF path to use, optionally pre-filtering for an attribute.
+
+    When ``featurecounts.gtf_filter`` is set (e.g. ``"gene_name"``), rows
+    lacking that attribute are stripped out.  The filtered file is cached in
+    the work directory so it only runs once.
+    """
+    raw_gtf = cfg["references"]["gtf"]
+    gtf_filter = cfg.get("featurecounts", {}).get("gtf_filter", "")
+    if not gtf_filter:
+        return raw_gtf
+
+    work_dir = Path(cfg.get("_work_dir", "work"))
+    ensure_dirs(work_dir)
+    filtered = work_dir / f"filtered_{gtf_filter}_{Path(raw_gtf).stem.replace('.', '_')}.gtf"
+    if filtered.exists():
+        logger.info("Using cached filtered GTF: %s", filtered)
+        return str(filtered)
+
+    import gzip
+    import shutil
+
+    logger.info("Pre-filtering GTF for attribute '%s' ...", gtf_filter)
+    opener = gzip.open if raw_gtf.endswith(".gz") else open
+    n_in = 0
+    n_out = 0
+    with opener(raw_gtf, "rt", encoding="utf-8", errors="replace") as fin, \
+         open(filtered, "w", encoding="utf-8") as fout:
+        for line in fin:
+            n_in += 1
+            if line.startswith("#") or gtf_filter in line:
+                fout.write(line)
+                n_out += 1
+
+    logger.info("  GTF filtered: %d -> %d lines (kept rows with '%s')",
+                n_in, n_out, gtf_filter)
+    return str(filtered)
+
+
 # =========================================================================
 # Main
 # =========================================================================
@@ -312,7 +351,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     logger.info("=" * 60)
 
     results_dir = Path(cfg["_results_dir"])
-    gtf = cfg["references"]["gtf"]
+    gtf = _prepare_gtf(cfg, results_dir)
 
     samples_tsv = Path(cfg.get("_samples_tsv", results_dir / "samples.tsv"))
     samples = read_samples_tsv(samples_tsv)

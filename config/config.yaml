@@ -1,7 +1,19 @@
 # =============================================================================
 # RNA-seq Analysis Pipeline Configuration (exam runbook)
 # =============================================================================
-# This file is the single place to tune pipeline behavior.
+# This file is configured for GSE48519 (mouse, Tet1/Tet2 vs WT).
+#
+# Other configs in this directory:
+#   config_GSE104853.yaml  -- human miRNA-125a dataset (worked example)
+#   config_template.yaml   -- blank exam-day template (copy + fill in)
+#
+# Quick exam-day setup:
+#   1. ./py scripts/inspect_metadata.py /data/GSEXXXXX/metadata.csv
+#   2. cp config/config_template.yaml config/config_exam.yaml
+#   3. Fill in the EXAM-marked fields from the inspector output
+#   4. ./py scripts/run_pipeline.py --config config/config_exam.yaml \
+#        --dataset GSEXXXXX --species human run --methods none cutadapt
+#
 # Keep this as your checklist on exam day:
 #
 # Step 00 (env):     usually no config change; verify tools and Python env.

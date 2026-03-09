@@ -250,6 +250,90 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     else:
         rpt.paragraph("*(Method comparison not available -- run step 10 first)*")
 
+    # === IGV Loading Guide ===================================================
+    rpt.h2("IGV Coverage Tracks")
+    rpt.paragraph(
+        "BigWig files for viewing read coverage in IGV are located in the "
+        "results tree under `<trim_method>/bigwig/<mapper>/<mapper_option>/`. "
+        "Load these into IGV alongside the reference genome to inspect "
+        "coverage at top DE gene loci."
+    )
+    rpt.paragraph("**How to use:**")
+    rpt.bullet("Open IGV and load the correct genome (e.g. hg38 or mm39).")
+    rpt.bullet("File > Load from File > select `.bw` files for each sample.")
+    rpt.bullet(
+        "Navigate to a top DE gene (from `top20_de_genes.tsv`) to see "
+        "coverage differences between conditions."
+    )
+    rpt.bullet("Take screenshots of 1-2 interesting genes for the report.")
+    rpt.paragraph("")
+
+    # List BigWig files found in this run
+    bw_files = sorted(results_dir.rglob("*.bw"))
+    if bw_files:
+        rpt.paragraph(f"**BigWig files produced ({len(bw_files)}):**")
+        for bw in bw_files[:20]:
+            rpt.bullet(f"`{bw.relative_to(results_dir)}`")
+        if len(bw_files) > 20:
+            rpt.paragraph(f"*(... and {len(bw_files) - 20} more)*")
+    else:
+        rpt.paragraph("*(No BigWig files found -- run step 06)*")
+
+    # === Top DE genes for IGV ================================================
+    rpt.h3("Suggested Genes to Inspect in IGV")
+    rpt.paragraph(
+        "The top differentially expressed genes from each contrast are listed "
+        "in `top20_de_genes.tsv` in each DE output directory. Navigate to "
+        "these genes in IGV to visualise the coverage difference."
+    )
+
+    # === Functional Enrichment Checklist =====================================
+    rpt.h2("Functional Enrichment Analysis Checklist")
+    rpt.paragraph(
+        "The pipeline exports gene lists ready for external enrichment tools. "
+        "Complete this checklist to earn advanced-task marks."
+    )
+    rpt.paragraph("**Enrichment gene list files (per contrast):**")
+    rpt.bullet("`top_genes_for_enrichment.txt` -- all significant DEGs")
+    rpt.bullet("`top_up_genes_for_enrichment.txt` -- upregulated only")
+    rpt.bullet("`top_down_genes_for_enrichment.txt` -- downregulated only")
+    rpt.bullet("`top200_*.txt` -- capped versions for tools with upload limits")
+    rpt.paragraph("")
+
+    rpt.paragraph("**Step-by-step workflow:**")
+    rpt.paragraph(
+        "1. Locate the enrichment files in "
+        "`results/<run_id>/<trim_method>/deseq2/<mapper>/<mapper_option>/<contrast>/`"
+    )
+    rpt.paragraph(
+        "2. **g:Profiler** (https://biit.cs.ut.ee/gprofiler/gost): "
+        "Paste gene list, select organism, run. Screenshot the top enriched "
+        "GO terms and pathways."
+    )
+    rpt.paragraph(
+        "3. **Enrichr** (https://maayanlab.cloud/Enrichr/): "
+        "Paste gene list. Check GO Biological Process, KEGG, and "
+        "WikiPathways tabs. Screenshot combined-score bar charts."
+    )
+    rpt.paragraph(
+        "4. **iDEP** (https://bioinformatics.sdstate.edu/idep/): "
+        "Upload `normalized_counts.tsv` from the same DE directory. "
+        "Provides PCA, clustering, enrichment, and pathway analysis."
+    )
+    rpt.paragraph(
+        "5. Include 1-2 key enrichment findings in the report with "
+        "adjusted p-values and GO/pathway IDs."
+    )
+
+    # List enrichment files found
+    enrich_files = sorted(results_dir.rglob("*_for_enrichment.txt"))
+    if enrich_files:
+        rpt.paragraph(f"\n**Enrichment files produced ({len(enrich_files)}):**")
+        for ef in enrich_files[:30]:
+            rpt.bullet(f"`{ef.relative_to(results_dir)}`")
+        if len(enrich_files) > 30:
+            rpt.paragraph(f"*(... and {len(enrich_files) - 30} more)*")
+
     # === Provenance =========================================================
     rpt.add_config_provenance(cfg)
 

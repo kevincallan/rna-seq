@@ -65,7 +65,7 @@ SPECIES_MAP: Dict[str, Dict[str, str]] = {
     },
     "human": {
         "index_dir": "hg38",
-        "genome_dir": "/data/genomes/human",
+        "genome_dir": "/data/genomes/human/hg38",
     },
 }
 

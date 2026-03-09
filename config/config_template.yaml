@@ -1,0 +1,182 @@
+# =============================================================================
+# RNA-seq Pipeline Configuration -- EXAM TEMPLATE
+# =============================================================================
+# Copy this file and fill in the fields marked # EXAM below.
+#
+# Quick setup:
+#   1. Run: ./py scripts/inspect_metadata.py /data/GSEXXXXX/metadata.csv
+#   2. Copy the suggested YAML snippets into the EXAM fields below.
+#   3. Run: ./py scripts/run_pipeline.py --config config/config_exam.yaml \
+#             --dataset GSEXXXXX --species human run --methods none cutadapt
+#
+# See config/config.yaml (mouse example) and config/config_GSE104853.yaml
+# (human example) for fully worked configurations.
+# =============================================================================
+
+# -- Project metadata ---------------------------------------------------------
+project:
+  name: "EXAM_PROJECT"            # EXAM: short name for the dataset
+  results_dir: "results"
+  work_dir: "work"
+  logs_dir: "logs"
+  threads: 4
+
+# -- Input data ---------------------------------------------------------------
+data:
+  metadata_csv: "/data/GSEXXXXX/metadata.csv"   # EXAM: set via --dataset CLI
+  fastq_dir: "/data/GSEXXXXX"                   # EXAM: set via --dataset CLI
+  layout: "paired"                               # EXAM: check LibraryLayout in CSV
+
+# -- Column mapping -----------------------------------------------------------
+# EXAM: paste the column_mapping snippet from inspect_metadata.py output here.
+column_mapping:
+  run_id_col: "Run"
+  condition_cols:                                 # EXAM: which CSV column(s) define conditions
+    - "CHANGE_ME"
+  condition_map:                                  # EXAM: map raw values to short names
+    "raw condition value 1": "CondA"
+    "raw condition value 2": "CondB"
+  replicate_strategy: "sorted_run_id"
+
+# -- Subset filters -----------------------------------------------------------
+# EXAM: filter to RNA-Seq rows; add extra filters if the CSV has mixed assays.
+subset_filters:
+  default:
+    "Assay Type": "RNA-Seq"
+
+active_subset: "default"
+
+# -- Reference genome ---------------------------------------------------------
+# Typically overridden by --species mouse or --species human on the CLI.
+# Only set these manually if auto-discovery fails.
+references:
+  genome_index: "/data/indices/mm39/star"
+  gtf: "/data/genomes/mouse/GRCm39/Mus_musculus.GRCm39.115.chr_gene_names.gtf.gz"
+  genome_fasta: "/data/genomes/mouse/GRCm39/Mus_musculus.GRCm39.dna.primary_assembly.fa.gz"
+
+# -- Tool paths ---------------------------------------------------------------
+tools:
+  fastqc: "fastqc"
+  multiqc: "multiqc"
+  cutadapt: "cutadapt"
+  fastp: "fastp"
+  trimmomatic: "trimmomatic"
+  star: "STAR"
+  hisat2: "hisat2"
+  samtools: "samtools"
+  featurecounts: "featureCounts"
+  bamcoverage: "bamCoverage"
+
+# -- Mapping approaches -------------------------------------------------------
+mapping:
+  backends:
+    star:
+      enabled: true
+      genome_index: "/data/indices/mm39/star"    # overridden by --species
+      option_sets:
+        default:
+          outFilterMultimapNmax: 20
+          extra_args: ""
+        strict_unique:
+          outFilterMultimapNmax: 1
+          extra_args: ""
+    hisat2:
+      enabled: false
+      index_prefix: ""
+      option_sets:
+        default:
+          extra_args: ""
+
+# -- STAR mapping parameters --------------------------------------------------
+star_params:
+  outSAMtype: "BAM SortedByCoordinate"
+  readFilesCommand: "zcat"
+  outFilterMultimapNmax: 20
+  extra_args: ""
+
+# -- Trimming methods ---------------------------------------------------------
+trimming:
+  none:
+    enabled: true
+
+  cutadapt:
+    enabled: true
+    adapter_fwd: "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"
+    adapter_rev: "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"
+    quality: 20
+    min_length: 25
+    extra_args: ""
+
+  fastp:
+    enabled: false
+    quality: 20
+    min_length: 25
+    detect_adapter: true
+    extra_args: ""
+
+  trimmomatic:
+    enabled: false
+    adapter_file: "TruSeq3-PE-2.fa"
+    leading: 3
+    trailing: 3
+    slidingwindow: "4:20"
+    min_length: 25
+    extra_args: ""
+
+# -- featureCounts options ----------------------------------------------------
+# attribute: "gene_id" for Ensembl IDs; "gene_name" for gene symbols.
+# gtf_filter: set to "gene_name" if attribute is "gene_name" (filters GTF).
+# strandedness: 0=unstranded, 1=stranded, 2=reverse-stranded.
+featurecounts:
+  backend: "featurecounts"
+  strandedness: 0                                # EXAM: check dataset protocol
+  feature_type: "exon"
+  attribute: "gene_id"                           # EXAM: "gene_id" or "gene_name"
+  gtf_filter: ""                                 # set to "gene_name" if attribute is gene_name
+  option_sets:
+    default:
+      label: "Default"
+      B: false
+      P: false
+      C: false
+      Q: 0
+      extra_args: ""
+    strict:
+      label: "Strict (B+P+C+Q10)"
+      B: true
+      P: true
+      C: true
+      Q: 10
+      extra_args: ""
+    stringent:
+      label: "Stringent (B+P+C+Q255)"
+      B: true
+      P: true
+      C: true
+      Q: 255
+      extra_args: ""
+
+# -- Matrix filtering ---------------------------------------------------------
+filtering:
+  min_max_count: "auto"
+
+# -- DESeq2 parameters --------------------------------------------------------
+deseq2:
+  fdr_threshold: 0.05
+  lfc_threshold: 0.0
+  method: "pydeseq2"
+  reference_level: "CondA"                       # EXAM: set to the control condition short name
+
+# -- Contrasts / comparisons --------------------------------------------------
+# EXAM: define your contrast(s). numerator = treatment, denominator = control.
+comparisons:
+  - name: "CondB_vs_CondA"                       # EXAM: change to match your conditions
+    numerator: "CondB"
+    denominator: "CondA"
+
+# -- BigWig parameters --------------------------------------------------------
+bigwig:
+  normalization: "CPM"
+  mapq_filter: 255
+  bin_size: 50
+  use_deseq2_sizefactors: true

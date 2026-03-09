@@ -203,6 +203,11 @@ def run_pydeseq2(
         len(sig_genes), len(up_genes), len(down_genes), out_dir,
     )
 
+    # --- Top-20 DE gene table (exam report ready) ----------------------------
+    top20 = results.head(20)[["baseMean", "log2FoldChange", "padj"]].copy()
+    top20.to_csv(out_dir / "top20_de_genes.tsv", sep="\t")
+    logger.info("  Top-20 DE gene table -> %s", out_dir / "top20_de_genes.tsv")
+
     # --- PCA plot --------------------------------------------------------
     _pydeseq2_pca_plot(dds, metadata, contrast_name, out_dir)
 

@@ -1,0 +1,181 @@
+# =============================================================================
+# RNA-seq Pipeline Configuration -- GSE104853 (miRNA-125a, Human)
+# =============================================================================
+# This config runs the miRNA-125a overexpression dataset from:
+#   https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE104853
+#   https://pmc.ncbi.nlm.nih.gov/articles/PMC9680651/
+#
+# 6 samples (3 Ctrl + 3 miRNA125a), THP-1 monocytic cells, human (hg38).
+#
+# To adapt for a different dataset, see config/config_template.yaml or run:
+#   ./py scripts/inspect_metadata.py /data/GSEXXXXX/metadata.csv
+# =============================================================================
+
+# -- Project metadata ---------------------------------------------------------
+project:
+  name: "GSE104853_miRNA125a"
+  results_dir: "results"
+  work_dir: "work"
+  logs_dir: "logs"
+  threads: 4
+
+# -- Input data ---------------------------------------------------------------
+data:
+  metadata_csv: "/data/GSE104853/metadata.csv"
+  fastq_dir: "/data/GSE104853"
+  layout: "paired"
+
+# -- Column mapping -----------------------------------------------------------
+# The condition column in this dataset is "treatment".
+# The raw values are long descriptions that we shorten to safe names.
+column_mapping:
+  run_id_col: "Run"
+  condition_cols:
+    - "treatment"
+  condition_map:
+    "transfected with negative control microRNA mimic": "Ctrl"
+    "transfected with miR-125a-5p mimic": "miRNA125a"
+  replicate_strategy: "sorted_run_id"
+
+# -- Subset filters -----------------------------------------------------------
+# All 6 rows are RNA-Seq; no further filtering needed.
+subset_filters:
+  default:
+    "Assay Type": "RNA-Seq"
+
+active_subset: "default"
+
+# -- Reference genome (human hg38) -------------------------------------------
+# These are auto-resolved by --species human, but explicit here for clarity.
+references:
+  genome_index: "/data/indices/hg38/star"
+  gtf: "/data/genomes/human/hg38/Homo_sapiens.GRCh38.115.chr.gtf.gz"
+  genome_fasta: "/data/genomes/human/hg38/hg38.fa"
+
+# -- Tool paths ---------------------------------------------------------------
+tools:
+  fastqc: "fastqc"
+  multiqc: "multiqc"
+  cutadapt: "cutadapt"
+  fastp: "fastp"
+  trimmomatic: "trimmomatic"
+  star: "STAR"
+  hisat2: "hisat2"
+  samtools: "samtools"
+  featurecounts: "featureCounts"
+  bamcoverage: "bamCoverage"
+
+# -- Mapping approaches -------------------------------------------------------
+mapping:
+  backends:
+    star:
+      enabled: true
+      genome_index: "/data/indices/hg38/star"
+      option_sets:
+        default:
+          outFilterMultimapNmax: 20
+          extra_args: ""
+        strict_unique:
+          outFilterMultimapNmax: 1
+          extra_args: ""
+    hisat2:
+      enabled: false
+      index_prefix: ""
+      option_sets:
+        default:
+          extra_args: ""
+
+# -- STAR mapping parameters --------------------------------------------------
+star_params:
+  outSAMtype: "BAM SortedByCoordinate"
+  readFilesCommand: "zcat"
+  outFilterMultimapNmax: 20
+  extra_args: ""
+
+# -- Trimming methods ---------------------------------------------------------
+trimming:
+  none:
+    enabled: true
+
+  cutadapt:
+    enabled: true
+    adapter_fwd: "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"
+    adapter_rev: "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"
+    quality: 20
+    min_length: 25
+    extra_args: ""
+
+  fastp:
+    enabled: false
+    quality: 20
+    min_length: 25
+    detect_adapter: true
+    extra_args: ""
+
+  trimmomatic:
+    enabled: false
+    adapter_file: "TruSeq3-PE-2.fa"
+    leading: 3
+    trailing: 3
+    slidingwindow: "4:20"
+    min_length: 25
+    extra_args: ""
+
+# -- featureCounts options ----------------------------------------------------
+# attribute: "gene_name" produces human-readable gene symbols in DE output.
+# gtf_filter: "gene_name" pre-filters the GTF to rows containing gene_name
+#   (matches the notebook's zgrep step).
+# strandedness: 0 = unstranded (matches the notebook's default).
+featurecounts:
+  backend: "featurecounts"
+  strandedness: 0
+  feature_type: "exon"
+  attribute: "gene_name"
+  gtf_filter: "gene_name"
+  option_sets:
+    default:
+      label: "Default"
+      B: false
+      P: false
+      C: false
+      Q: 0
+      extra_args: ""
+    strict:
+      label: "Strict (B+P+C+Q10)"
+      B: true
+      P: true
+      C: true
+      Q: 10
+      extra_args: ""
+    stringent:
+      label: "Stringent (B+P+C+Q255)"
+      B: true
+      P: true
+      C: true
+      Q: 255
+      extra_args: ""
+
+# -- Matrix filtering ---------------------------------------------------------
+filtering:
+  min_max_count: "auto"
+
+# -- DESeq2 parameters --------------------------------------------------------
+deseq2:
+  fdr_threshold: 0.05
+  lfc_threshold: 0.0
+  method: "pydeseq2"
+  reference_level: "Ctrl"
+
+# -- Contrasts / comparisons --------------------------------------------------
+# miRNA-125a overexpression vs negative control.
+comparisons:
+  - name: "miRNA125a_vs_Ctrl"
+    numerator: "miRNA125a"
+    denominator: "Ctrl"
+
+# -- BigWig parameters --------------------------------------------------------
+bigwig:
+  normalization: "CPM"
+  mapq_filter: 255
+  bin_size: 50
+  use_deseq2_sizefactors: true
