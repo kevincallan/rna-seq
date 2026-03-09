@@ -168,14 +168,15 @@ deseq2:
   fdr_threshold: 0.05
   lfc_threshold: 0.0
   method: "pydeseq2"
-  reference_level: "Ctrl"
+  reference_level: "ctrl"
 
 # -- Contrasts / comparisons --------------------------------------------------
 # miRNA-125a overexpression vs negative control.
+# NOTE: use lowercase names — safe_name() lowercases condition_map values.
 comparisons:
-  - name: "miRNA125a_vs_Ctrl"
-    numerator: "miRNA125a"
-    denominator: "Ctrl"
+  - name: "mirna125a_vs_ctrl"
+    numerator: "mirna125a"
+    denominator: "ctrl"
 
 # -- BigWig parameters --------------------------------------------------------
 bigwig:
