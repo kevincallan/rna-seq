@@ -111,11 +111,9 @@ def load_de_genes(
     fdr: float,
 ) -> Set[str]:
     """Load set of significant gene IDs from a DESeq2 result."""
-    # Try rscript-style path first
     de_base = resolve_de_base(results_dir, unit)
     de_path = de_base / contrast / "de_all.tsv"
     if not de_path.exists():
-        # Try wrapper-style path
         de_path = de_base / "DESeq2.de_all.tsv"
     if not de_path.exists():
         return set()

@@ -166,11 +166,8 @@ def validate_tools(cfg: Dict[str, Any]) -> Dict[str, str]:
             dedup_required.append(tool)
     required = dedup_required
 
-    # R is only needed for R-based DESeq2 backends
     de_method = cfg.get("deseq2", {}).get("method", "pydeseq2")
-    if de_method == "rscript":
-        required.append("rscript")
-    elif de_method == "pydeseq2":
+    if de_method == "pydeseq2":
         # Verify pydeseq2 is importable (pure Python, no system tool)
         try:
             import pydeseq2

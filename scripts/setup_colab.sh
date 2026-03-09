@@ -226,7 +226,6 @@ tools:
   samtools: "samtools"
   featurecounts: "featureCounts"
   bamcoverage: "bamCoverage"
-  rscript: "Rscript"
 
 star_params:
   outSAMtype: "BAM SortedByCoordinate"

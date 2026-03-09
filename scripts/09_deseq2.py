@@ -2,15 +2,10 @@
 """
 Step 09 -- Differential expression analysis.
 
-Supports three backends (set ``deseq2.method`` in config):
+Backends (set ``deseq2.method`` in config):
 
-  - ``pydeseq2``: Pure Python -- no R needed. Works everywhere including
-    Colab, JupyterHub, any pip environment.  DEFAULT.
-  - ``rscript``: calls ``deseq2_run.R`` via Rscript (needs R + DESeq2).
+  - ``pydeseq2``: Pure Python -- no R needed.  DEFAULT and recommended.
   - ``wrapper``: calls ``DESeq2_wrapper`` (available on course server).
-
-All backends produce the same output files so downstream steps (BigWig
-size-factor scaling, compare_methods, report) work identically.
 """
 
 from __future__ import annotations
@@ -36,9 +31,6 @@ from src.utils import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Path to the R script shipped with this pipeline
-DESEQ2_R_SCRIPT = Path(__file__).resolve().parent / "deseq2_run.R"
 
 
 # =========================================================================
@@ -370,47 +362,7 @@ def _pydeseq2_session_info(out_dir: Path, contrast_name: str) -> None:
 
 
 # =========================================================================
-# Backend 2: R script (deseq2_run.R)
-# =========================================================================
-
-def run_deseq2_rscript(
-    count_matrix: Path,
-    sample_desc: Path,
-    contrast_name: str,
-    numerator: str,
-    denominator: str,
-    out_dir: Path,
-    cfg: Dict[str, Any],
-) -> None:
-    """Run DESeq2 analysis using deseq2_run.R."""
-    rscript = cfg["tools"].get("rscript", "Rscript")
-    deseq_cfg = cfg.get("deseq2", {})
-    fdr = deseq_cfg.get("fdr_threshold", 0.05)
-    lfc = deseq_cfg.get("lfc_threshold", 0.0)
-    ref_level = deseq_cfg.get("reference_level", "")
-
-    ensure_dirs(out_dir)
-
-    cmd = [
-        rscript, str(DESEQ2_R_SCRIPT),
-        "--counts", str(count_matrix),
-        "--samples", str(sample_desc),
-        "--contrast_name", contrast_name,
-        "--numerator", numerator,
-        "--denominator", denominator,
-        "--fdr", str(fdr),
-        "--lfc", str(lfc),
-        "--outdir", str(out_dir),
-    ]
-
-    if ref_level:
-        cmd.extend(["--reference_level", ref_level])
-
-    run_cmd(cmd, description=f"DESeq2 R {contrast_name}")
-
-
-# =========================================================================
-# Backend 3: DESeq2_wrapper (course server)
+# Backend 2: DESeq2_wrapper (course server)
 # =========================================================================
 
 def run_deseq2_wrapper(
@@ -580,28 +532,6 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                 stats["contrast"] = "auto"
                 all_de_stats.append(stats)
 
-        elif method_backend == "rscript":
-            # Custom R script -- run each contrast
-            for contrast in comparisons:
-                cname = contrast["name"]
-                num = contrast["numerator"]
-                den = contrast["denominator"]
-                contrast_dir = de_dir / cname
-                logger.info("  Contrast: %s (%s vs %s)", cname, num, den)
-                run_deseq2_rscript(
-                    count_matrix, sample_desc,
-                    cname, num, den, contrast_dir, cfg,
-                )
-                de_all = contrast_dir / "de_all.tsv"
-                stats = count_degs(de_all, fdr)
-                stats["trim_method"] = method
-                stats["method"] = method
-                stats["mapper"] = mapper
-                stats["mapper_option_set"] = mapper_opt
-                stats["count_option_set"] = primary_opt
-                stats["contrast"] = cname
-                all_de_stats.append(stats)
-
         elif method_backend == "pydeseq2":
             # Pure Python -- no R required
             for contrast in comparisons:
@@ -627,7 +557,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         else:
             raise ValueError(
                 f"Unknown deseq2.method: '{method_backend}'. "
-                "Use 'pydeseq2', 'rscript', or 'wrapper'."
+                "Use 'pydeseq2' or 'wrapper'."
             )
 
     # Write DE summary
