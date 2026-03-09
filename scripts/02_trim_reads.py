@@ -121,28 +121,51 @@ def _trim_cutadapt(
 
     result = run_cmd(cmd, description=f"cutadapt {sample.sample_name}")
 
-    # Parse cutadapt log from stderr
-    metrics["reads_in"] = _parse_cutadapt_metric(result.stderr, "Total read pairs processed")
-    metrics["reads_out"] = _parse_cutadapt_metric(result.stderr, "Pairs written")
-    metrics["bases_trimmed"] = "see_log"
+    # Cutadapt writes its summary to stderr (older versions) or stdout (newer).
+    combined_log = (result.stdout or "") + "\n" + (result.stderr or "")
+
+    metrics["reads_in"] = _parse_cutadapt_metric(
+        combined_log,
+        ["Total read pairs processed", "Total reads processed"],
+    )
+    metrics["reads_out"] = _parse_cutadapt_metric(
+        combined_log,
+        ["Pairs written (passing filters)", "Reads written (passing filters)",
+         "Pairs written", "Reads written"],
+    )
+    metrics["bases_trimmed"] = _parse_cutadapt_metric(
+        combined_log,
+        ["Quality-trimmed", "Bases trimmed"],
+    )
 
     # Save log
     log_path = log_dir / f"{sample.sample_name}.cutadapt.log"
-    log_path.write_text(result.stderr or "", encoding="utf-8")
+    log_path.write_text(combined_log, encoding="utf-8")
 
     return metrics
 
 
-def _parse_cutadapt_metric(text: str, label: str) -> str:
-    """Extract a value from cutadapt log output."""
+def _parse_cutadapt_metric(text: str, labels: list) -> str:
+    """Extract a numeric value from cutadapt log output.
+
+    Searches for any of the given labels and returns the first match.
+    Handles formats like ``"Total read pairs processed:  1,234,567"``
+    and ``"Pairs written (passing filters):  1,200,000 (97.2%)"``
+    """
     if not text:
         return "N/A"
     for line in text.splitlines():
-        if label in line:
-            # e.g. "Total read pairs processed:          1,234"
-            parts = line.split(":")
-            if len(parts) >= 2:
-                return parts[-1].strip().replace(",", "")
+        for label in labels:
+            if label in line:
+                parts = line.split(":")
+                if len(parts) >= 2:
+                    val = parts[-1].strip()
+                    # Strip trailing percentage / parenthetical
+                    val = val.split("(")[0].strip()
+                    val = val.replace(",", "")
+                    # Take first token if there's whitespace left
+                    val = val.split()[0] if val else "N/A"
+                    return val
     return "N/A"
 
 
