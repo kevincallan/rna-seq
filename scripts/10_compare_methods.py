@@ -236,12 +236,12 @@ def summarize_featurecounts_options(
         lambda: {"n": 0.0, "sum": 0.0, "min": float("inf"), "max": float("-inf")}
     )
     for row in fc_rows:
-        method = row.get("method", "")
+        method = row.get("trim_method", row.get("method", ""))
         mapper = row.get("mapper", "star")
         mapper_opt = row.get("mapper_option_set", "default")
         opt = row.get("option_set", "")
         try:
-            val = float(row.get("assigned_reads", "0"))
+            val = float(row.get("Assigned", row.get("assigned_reads", "0")))
         except ValueError:
             continue
         key = (method, mapper, mapper_opt, opt)
@@ -339,7 +339,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
             "|-------------|--------|---------------|--------|-------------------|----------------|"
         )
         for row in mapping_data:
-            method = row.get("method", row.get("trim_method", ""))
+            method = row.get("trim_method", row.get("method", ""))
             comparison_lines.append(
                 f"| {method} | {row.get('mapper', 'star')} | {row.get('mapper_option_set', 'default')} "
                 f"| {row.get('sample', '')} "
@@ -356,7 +356,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
             lambda: {"n": 0.0, "uniq_sum": 0.0}
         )
         for row in mapping_data:
-            method = row.get("method", row.get("trim_method", ""))
+            method = row.get("trim_method", row.get("method", ""))
             mapper = row.get("mapper", "star")
             mapper_opt = row.get("mapper_option_set", "default")
             uniq_pct = row.get("uniquely_mapped_pct", "").replace("%", "")
@@ -392,11 +392,11 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
             "|-------------|--------|---------------|------------------|--------|----------------|"
         )
         for row in fc_data:
-            method = row.get("method", row.get("trim_method", ""))
+            method = row.get("trim_method", row.get("method", ""))
             comparison_lines.append(
                 f"| {method} | {row.get('mapper', 'star')} | {row.get('mapper_option_set', 'default')} "
                 f"| {row.get('option_set', '')} "
-                f"| {row.get('sample', '')} | {row.get('assigned_reads', 'N/A')} |"
+                f"| {row.get('sample', '')} | {row.get('Assigned', row.get('assigned_reads', 'N/A'))} |"
             )
     else:
         comparison_lines.append("*(featureCounts summary not available)*\n")

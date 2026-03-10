@@ -34,7 +34,7 @@ project:
   results_dir: "results"            # top-level results folder
   work_dir: "work"                  # intermediate files
   logs_dir: "logs"                  # per-run log directory
-  threads: 4                        # default thread count for tools
+  threads: 6                        # default thread count for tools
 
 # -- Input data ---------------------------------------------------------------
 data:

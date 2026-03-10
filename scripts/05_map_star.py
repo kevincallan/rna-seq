@@ -147,6 +147,39 @@ def index_bam(bam: Path, cfg: Dict[str, Any]) -> None:
         )
 
 
+def filter_bam(bam: Path, cfg: Dict[str, Any]) -> Path:
+    """Create a quality-filtered BAM: MAPQ>=255, properly paired, no secondary/supplementary.
+
+    Returns the path to the filtered BAM (indexed).
+    """
+    import pysam
+
+    filtered = bam.parent / bam.name.replace(".bam", ".filtered.bam")
+    if filtered.exists():
+        logger.info("  Filtered BAM already exists: %s", filtered.name)
+        return filtered
+
+    logger.info("  Filtering %s -> %s", bam.name, filtered.name)
+    # flag 2 = properly paired; exclude 2316 = secondary(256) + supplementary(2048) + not_passing_qc(512)
+    with pysam.AlignmentFile(str(bam), "rb") as infile:
+        with pysam.AlignmentFile(str(filtered), "wb", header=infile.header) as outfile:
+            kept = 0
+            total = 0
+            for read in infile:
+                total += 1
+                if (read.mapping_quality >= 255
+                        and not read.is_secondary
+                        and not read.is_supplementary
+                        and not read.is_qcfail):
+                    outfile.write(read)
+                    kept += 1
+
+    pysam.index(str(filtered))
+    logger.info("    Kept %d / %d reads (%.1f%%)", kept, total,
+                100.0 * kept / total if total else 0)
+    return filtered
+
+
 # ---------------------------------------------------------------------------
 # Parse STAR Log.final.out
 # ---------------------------------------------------------------------------
@@ -330,19 +363,21 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                     raw_stats = parse_star_log(star_log)
                     summary = extract_mapping_summary(raw_stats)
 
-                summary["method"] = method
+                filtered_bam = filter_bam(bam, cfg)
+
                 summary["trim_method"] = method
                 summary["mapper"] = mapper
                 summary["mapper_option_set"] = map_opt_name
                 summary["sample"] = s.sample_name
                 summary["bam_path"] = str(bam)
+                summary["filtered_bam_path"] = str(filtered_bam)
                 all_mapping_stats.append(summary)
 
     # Write mapping summary table
     summary_path = results_dir / "mapping_summary.tsv"
     if all_mapping_stats:
         fields = [
-            "trim_method", "method", "mapper", "mapper_option_set", "sample", "bam_path",
+            "trim_method", "mapper", "mapper_option_set", "sample", "bam_path", "filtered_bam_path",
             "input_reads", "uniquely_mapped", "uniquely_mapped_pct",
             "multi_mapped", "multi_mapped_pct",
             "unmapped_mismatch", "unmapped_short", "unmapped_other",

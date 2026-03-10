@@ -36,21 +36,32 @@ def build_mapping_units(
     results_dir: Path,
     samples: list,
     methods: List[str],
+    prefer_filtered: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Collect mapping units and per-sample BAMs."""
+    """Collect mapping units and per-sample BAMs.
+
+    When *prefer_filtered* is True, use the pre-filtered BAM
+    (``filtered_bam_path`` in mapping_summary.tsv) if it exists.
+    """
     mapping_summary = results_dir / "mapping_summary.tsv"
     units: Dict[tuple[str, str, str], Dict[str, Any]] = {}
     if mapping_summary.exists():
         with open(mapping_summary, encoding="utf-8") as fh:
             reader = csv.DictReader(fh, delimiter="\t")
             for row in reader:
-                method = row.get("method") or row.get("trim_method") or ""
+                method = row.get("trim_method") or row.get("method") or ""
                 mapper = row.get("mapper", "star")
                 mapper_opt = row.get("mapper_option_set", "default")
                 sample = row.get("sample", "")
                 bam_path = row.get("bam_path", "")
                 if method not in methods or not sample or not bam_path:
                     continue
+
+                if prefer_filtered:
+                    filtered = row.get("filtered_bam_path", "")
+                    if filtered and Path(filtered).exists():
+                        bam_path = filtered
+
                 key = (method, mapper, mapper_opt)
                 if key not in units:
                     units[key] = {
@@ -145,7 +156,8 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     samples = read_samples_tsv(samples_tsv)
     methods = methods_override or get_enabled_methods(cfg)
 
-    mapping_units = build_mapping_units(results_dir, samples, methods)
+    mapping_units = build_mapping_units(results_dir, samples, methods,
+                                        prefer_filtered=True)
     for unit in mapping_units:
         method = unit["method"]
         mapper = unit["mapper"]

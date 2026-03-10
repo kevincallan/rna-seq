@@ -43,7 +43,7 @@ def _infer_methods_from_outputs(results_dir: Path, cfg: Dict[str, Any]) -> List[
         with open(p, encoding="utf-8") as fh:
             reader = csv.DictReader(fh, delimiter="\t")
             for row in reader:
-                m = row.get("method")
+                m = row.get("method") or row.get("trim_method")
                 if m:
                     methods.add(m)
 

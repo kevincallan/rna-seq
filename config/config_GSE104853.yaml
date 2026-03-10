@@ -17,7 +17,7 @@ project:
   results_dir: "results"
   work_dir: "work"
   logs_dir: "logs"
-  threads: 4
+  threads: 6
 
 # -- Input data ---------------------------------------------------------------
 data:

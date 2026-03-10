@@ -65,10 +65,8 @@ def run_featurecounts(
         "-s", str(fc_cfg.get("strandedness", 2)),
     ]
 
-    # IMPORTANT: featureCounts needs -p for paired-end BAMs.
-    # Without -p, it treats the library as single-end and fails.
     if paired_end:
-        cmd.append("-p")
+        cmd.extend(["-p", "--countReadPairs"])
 
     if option_set.get("B", False):
         cmd.append("-B")

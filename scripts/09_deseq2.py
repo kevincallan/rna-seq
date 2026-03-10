@@ -525,7 +525,6 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
             if de_all.exists():
                 stats = count_degs(de_all, fdr)
                 stats["trim_method"] = method
-                stats["method"] = method
                 stats["mapper"] = mapper
                 stats["mapper_option_set"] = mapper_opt
                 stats["count_option_set"] = primary_opt
@@ -547,7 +546,6 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                 de_all = contrast_dir / "de_all.tsv"
                 stats = count_degs(de_all, fdr)
                 stats["trim_method"] = method
-                stats["method"] = method
                 stats["mapper"] = mapper
                 stats["mapper_option_set"] = mapper_opt
                 stats["count_option_set"] = primary_opt
@@ -566,7 +564,6 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         with open(de_summary_path, "w", newline="", encoding="utf-8") as fh:
             fields = [
                 "trim_method",
-                "method",
                 "mapper",
                 "mapper_option_set",
                 "count_option_set",
