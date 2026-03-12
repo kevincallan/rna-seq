@@ -130,11 +130,11 @@ trimming:
 # gtf_filter: "gene_name" pre-filters the GTF to rows containing gene_name
 #   (matches the notebook's zgrep step).
 # strandedness: 0=unstranded, 1=stranded, 2=reverse-stranded.
-# Set to 2 (reverse-stranded) as fix for 0-DEG result; validate with scripts/run_strand_test.py.
-# use_filtered_bam: if true, count from step-5 filtered BAMs (try only if strand fix insufficient).
+# run_strand_test.py (2026-03-12): strand 0 gave 42% assigned vs 22% for 1/2 → keep unstranded.
+# use_filtered_bam: if true, count from step-5 filtered BAMs (optional second fix).
 featurecounts:
   backend: "featurecounts"
-  strandedness: 2
+  strandedness: 0
   use_filtered_bam: false
   feature_type: "exon"
   attribute: "gene_name"
