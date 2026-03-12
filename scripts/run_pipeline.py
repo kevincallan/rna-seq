@@ -485,6 +485,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override project thread count (e.g. 1 to reduce memory on Colab)",
     )
+    run_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Force regeneration of outputs that already exist (e.g. BigWig files)",
+    )
 
     # --- list subcommand ----------------------------------------------------
     sub.add_parser("list", help="List available pipeline steps")
@@ -535,6 +540,10 @@ def main() -> None:
 
     if args.command == "run" and getattr(args, "threads", None) is not None:
         cfg["project"]["threads"] = args.threads
+    if args.command == "run" and getattr(args, "force", False):
+        cfg["_force"] = True
+    if args.command == "run" and getattr(args, "strict", False):
+        cfg["_strict"] = True
 
     # --- Run ----------------------------------------------------------------
     if args.command == "run":

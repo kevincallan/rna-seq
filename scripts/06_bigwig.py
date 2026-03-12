@@ -97,6 +97,9 @@ def make_bigwig(
 ) -> None:
     """Run bamCoverage to create a BigWig file.
 
+    Skips generation if ``out_bw`` already exists unless ``cfg["_force"]``
+    is set.
+
     Parameters
     ----------
     bam : Path
@@ -108,6 +111,10 @@ def make_bigwig(
     scale_factor : float, optional
         If provided, use ``--scaleFactor`` instead of ``--normalizeUsing``.
     """
+    if out_bw.exists() and not cfg.get("_force", False):
+        logger.info("  Skipping %s (already exists; use --force to regenerate)", out_bw.name)
+        return
+
     exe = cfg["tools"].get("bamcoverage", "bamCoverage")
     bw_cfg = cfg.get("bigwig", {})
     threads = cfg["project"].get("threads", 4)

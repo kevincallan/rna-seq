@@ -86,6 +86,56 @@ def parse_metadata(cfg: Dict[str, Any]) -> List[Dict[str, str]]:
     return rows
 
 
+def validate_metadata_columns(
+    rows: List[Dict[str, str]],
+    cfg: Dict[str, Any],
+) -> None:
+    """Validate that configured column names actually exist in the CSV.
+
+    Raises ``ValueError`` for missing required columns (run_id_col,
+    condition_cols).  Logs a warning for missing subset-filter columns.
+    """
+    if not rows:
+        raise ValueError("Metadata CSV is empty (0 rows)")
+
+    csv_cols = set(rows[0].keys())
+    col_map = cfg.get("column_mapping", {})
+
+    # --- run_id_col ---
+    run_col = col_map.get("run_id_col", "Run")
+    if run_col not in csv_cols:
+        raise ValueError(
+            f"run_id_col '{run_col}' not found in metadata CSV. "
+            f"Available columns: {sorted(csv_cols)}"
+        )
+
+    # --- condition_cols ---
+    for cc in col_map.get("condition_cols", []):
+        if cc not in csv_cols:
+            raise ValueError(
+                f"condition_col '{cc}' not found in metadata CSV. "
+                f"Available columns: {sorted(csv_cols)}"
+            )
+
+    # --- subset_filters (warn only) ---
+    subset_key = cfg.get("active_subset", "default")
+    all_filters = cfg.get("subset_filters", {})
+
+    if subset_key not in all_filters and all_filters:
+        logger.warning(
+            "active_subset '%s' not found in subset_filters (available: %s)",
+            subset_key, sorted(all_filters.keys()),
+        )
+
+    filters = all_filters.get(subset_key, {})
+    for fc in filters:
+        if fc not in csv_cols:
+            logger.warning(
+                "Subset filter column '%s' not found in metadata CSV. "
+                "Available columns: %s", fc, sorted(csv_cols),
+            )
+
+
 def apply_subset_filters(
     rows: List[Dict[str, str]],
     cfg: Dict[str, Any],
@@ -150,6 +200,8 @@ def build_condition(row: Dict[str, str], cfg: Dict[str, Any]) -> str:
 
     Uses ``column_mapping.condition_cols`` (list) and optionally maps
     values through ``column_mapping.condition_map``.
+
+    Raises ``ValueError`` if the resulting condition is empty.
     """
     col_map = cfg["column_mapping"]
     cond_cols: List[str] = col_map["condition_cols"]
@@ -161,12 +213,30 @@ def build_condition(row: Dict[str, str], cfg: Dict[str, Any]) -> str:
         mapped = value_map.get(raw, raw)
         parts.append(safe_name(mapped))
 
-    return "_".join(parts)
+    result = "_".join(p for p in parts if p)
+    if not result:
+        run_id = row.get(col_map.get("run_id_col", "Run"), "?")
+        raise ValueError(
+            f"Empty condition for run '{run_id}'. "
+            "Check condition_cols and condition_map in config."
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Design table (samples list)
 # ---------------------------------------------------------------------------
+
+def _resolve_fastq_r1(run_id: str, fastq_dir: str) -> str:
+    """Find the R1 FASTQ, supporting both ``{run_id}_1.fastq.gz`` and ``{run_id}.fastq.gz``."""
+    candidate = Path(fastq_dir) / f"{run_id}_1.fastq.gz"
+    if candidate.exists():
+        return str(candidate)
+    bare = Path(fastq_dir) / f"{run_id}.fastq.gz"
+    if bare.exists():
+        return str(bare)
+    return str(candidate)
+
 
 def build_design_table(
     rows: List[Dict[str, str]],
@@ -191,6 +261,19 @@ def build_design_table(
     layout = cfg["data"].get("layout", "paired")
     fastq_dir = cfg["data"]["fastq_dir"]
     strategy = col_map.get("replicate_strategy", "sorted_run_id")
+    strict = cfg.get("_strict", False)
+
+    # Check for duplicate run IDs
+    run_ids = [row[run_col].strip() for row in rows]
+    seen_runs: Dict[str, int] = {}
+    for rid in run_ids:
+        seen_runs[rid] = seen_runs.get(rid, 0) + 1
+    duplicates = {k: v for k, v in seen_runs.items() if v > 1}
+    if duplicates:
+        raise ValueError(
+            f"Duplicate run IDs in filtered metadata: {duplicates}. "
+            "Each run ID must appear only once."
+        )
 
     # Group runs by condition
     cond_runs: Dict[str, List[Dict[str, str]]] = defaultdict(list)
@@ -212,12 +295,22 @@ def build_design_table(
         for rep_idx, row in enumerate(group, start=1):
             run_id = row[run_col].strip()
 
-            # Detect layout
             sample_layout = _detect_layout(run_id, fastq_dir, layout)
 
-            # Resolve FASTQ paths
-            r1 = str(Path(fastq_dir) / f"{run_id}_1.fastq.gz")
+            r1 = _resolve_fastq_r1(run_id, fastq_dir)
             r2 = str(Path(fastq_dir) / f"{run_id}_2.fastq.gz") if sample_layout == "paired" else ""
+
+            # FASTQ existence check
+            missing: List[str] = []
+            if not Path(r1).exists():
+                missing.append(r1)
+            if sample_layout == "paired" and r2 and not Path(r2).exists():
+                missing.append(r2)
+            if missing:
+                msg = f"FASTQ not found for {run_id}: {missing}"
+                if strict:
+                    raise FileNotFoundError(msg)
+                logger.warning(msg)
 
             s = Sample(
                 run_id=run_id,
@@ -230,6 +323,18 @@ def build_design_table(
             samples.append(s)
             logger.info("  %s -> %s", run_id, s.sample_name)
 
+    # Check for duplicate derived sample names
+    name_counts: Dict[str, int] = {}
+    for s in samples:
+        name_counts[s.sample_name] = name_counts.get(s.sample_name, 0) + 1
+    dup_names = {k: v for k, v in name_counts.items() if v > 1}
+    if dup_names:
+        raise ValueError(
+            f"Duplicate derived sample names: {dup_names}. "
+            "This usually means condition_map produces the same label for "
+            "different raw values. Check condition_cols and condition_map."
+        )
+
     logger.info("Design table: %d samples across %d conditions",
                 len(samples), len(set(s.condition for s in samples)))
     return samples
@@ -239,6 +344,7 @@ def _detect_layout(
     run_id: str, fastq_dir: str, default: str
 ) -> str:
     """Detect paired vs single from file existence."""
+    default = default.strip().lower()
     if default in ("paired", "single"):
         return default
 

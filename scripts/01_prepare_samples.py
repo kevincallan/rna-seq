@@ -20,6 +20,7 @@ from src.metadata import (
     build_design_table,
     create_symlinks,
     parse_metadata,
+    validate_metadata_columns,
     write_sample_description,
     write_samples_tsv,
 )
@@ -54,6 +55,9 @@ def main(cfg: Dict[str, Any], subset_name: str | None = None) -> None:
 
     # 1. Parse metadata
     rows = parse_metadata(cfg)
+
+    # 1b. Validate configured columns exist in CSV
+    validate_metadata_columns(rows, cfg)
 
     # 2. Apply subset filters
     filtered = apply_subset_filters(rows, cfg, subset_name=subset_name)

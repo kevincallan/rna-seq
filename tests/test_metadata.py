@@ -23,6 +23,7 @@ from src.metadata import (
     build_condition,
     build_design_table,
     create_symlinks,
+    validate_metadata_columns,
     write_samples_tsv,
     read_samples_tsv,
 )
@@ -208,3 +209,116 @@ class TestSamplesTSV:
             assert orig.condition == back.condition
             assert orig.run_id == back.run_id
             assert orig.replicate == back.replicate
+
+
+# ---------------------------------------------------------------------------
+# Tests: validation and edge cases (exam-day hardening)
+# ---------------------------------------------------------------------------
+
+class TestColumnValidation:
+    def test_missing_run_id_col(self, sample_metadata_rows, base_config):
+        """Config references a run_id_col that doesn't exist in the CSV."""
+        base_config["column_mapping"]["run_id_col"] = "NonExistentCol"
+        with pytest.raises(ValueError, match="run_id_col 'NonExistentCol' not found"):
+            validate_metadata_columns(sample_metadata_rows, base_config)
+
+    def test_missing_condition_col(self, sample_metadata_rows, base_config):
+        """Config references a condition column that doesn't exist."""
+        base_config["column_mapping"]["condition_cols"] = ["MissingCol"]
+        with pytest.raises(ValueError, match="condition_col 'MissingCol' not found"):
+            validate_metadata_columns(sample_metadata_rows, base_config)
+
+
+class TestEmptyCondition:
+    def test_empty_condition_raises(self, base_config):
+        """Condition mapping that produces an empty name should raise."""
+        base_config["column_mapping"]["condition_cols"] = ["Genotype"]
+        base_config["column_mapping"]["condition_map"] = {"wild-type": ""}
+        row = {"Run": "SRR000001", "Genotype": "wild-type"}
+        with pytest.raises(ValueError, match="Empty condition"):
+            build_condition(row, base_config)
+
+
+class TestUnequalReplicates:
+    def test_three_plus_two(self, base_config):
+        """Unequal replicate counts produce correct numbering."""
+        rows = [
+            {"Run": "SRR1", "Assay Type": "RNA-Seq", "Genotype": "wild-type", "differentiation": ""},
+            {"Run": "SRR2", "Assay Type": "RNA-Seq", "Genotype": "wild-type", "differentiation": ""},
+            {"Run": "SRR3", "Assay Type": "RNA-Seq", "Genotype": "wild-type", "differentiation": ""},
+            {"Run": "SRR4", "Assay Type": "RNA-Seq", "Genotype": "tet1-/-", "differentiation": ""},
+            {"Run": "SRR5", "Assay Type": "RNA-Seq", "Genotype": "tet1-/-", "differentiation": ""},
+        ]
+        samples = build_design_table(rows, base_config)
+        assert len(samples) == 5
+
+        by_cond = {}
+        for s in samples:
+            by_cond.setdefault(s.condition, []).append(s)
+
+        assert [s.replicate for s in by_cond["wt"]] == [1, 2, 3]
+        assert [s.replicate for s in by_cond["tet1"]] == [1, 2]
+
+        names = [s.sample_name for s in samples]
+        assert len(names) == len(set(names)), "All sample names must be unique"
+
+
+class TestDuplicateRunId:
+    def test_duplicate_raises(self, base_config):
+        """Duplicate run IDs in filtered metadata should raise."""
+        rows = [
+            {"Run": "SRR1", "Genotype": "wild-type"},
+            {"Run": "SRR1", "Genotype": "wild-type"},
+        ]
+        with pytest.raises(ValueError, match="Duplicate run IDs"):
+            build_design_table(rows, base_config)
+
+
+class TestGSE104853Integration:
+    def test_mirna125a_design(self):
+        """End-to-end: GSE104853-style metadata produces expected design."""
+        rows = [
+            {"Run": "SRR6162944", "Assay Type": "RNA-Seq",
+             "treatment": "transfected with negative control microRNA mimic"},
+            {"Run": "SRR6162945", "Assay Type": "RNA-Seq",
+             "treatment": "transfected with negative control microRNA mimic"},
+            {"Run": "SRR6162946", "Assay Type": "RNA-Seq",
+             "treatment": "transfected with negative control microRNA mimic"},
+            {"Run": "SRR6162947", "Assay Type": "RNA-Seq",
+             "treatment": "transfected with miR-125a-5p mimic"},
+            {"Run": "SRR6162948", "Assay Type": "RNA-Seq",
+             "treatment": "transfected with miR-125a-5p mimic"},
+            {"Run": "SRR6162949", "Assay Type": "RNA-Seq",
+             "treatment": "transfected with miR-125a-5p mimic"},
+        ]
+        cfg = {
+            "data": {
+                "metadata_csv": "/data/GSE104853/metadata.csv",
+                "fastq_dir": "/data/GSE104853",
+                "layout": "paired",
+            },
+            "column_mapping": {
+                "run_id_col": "Run",
+                "condition_cols": ["treatment"],
+                "condition_map": {
+                    "transfected with negative control microRNA mimic": "Ctrl",
+                    "transfected with miR-125a-5p mimic": "miRNA125a",
+                },
+                "replicate_strategy": "sorted_run_id",
+            },
+            "subset_filters": {"default": {"Assay Type": "RNA-Seq"}},
+            "active_subset": "default",
+        }
+
+        filtered = apply_subset_filters(rows, cfg)
+        assert len(filtered) == 6
+
+        samples = build_design_table(filtered, cfg)
+        assert len(samples) == 6
+
+        names = sorted(s.sample_name for s in samples)
+        assert names == ["ctrl_1", "ctrl_2", "ctrl_3",
+                         "mirna125a_1", "mirna125a_2", "mirna125a_3"]
+
+        conditions = set(s.condition for s in samples)
+        assert conditions == {"ctrl", "mirna125a"}
