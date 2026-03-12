@@ -135,6 +135,8 @@ trimming:
 featurecounts:
   backend: "featurecounts"
   strandedness: 0
+  # use_filtered_bam: tested true on 2026-03-12; counts identical to unfiltered because
+  # featureCounts default already ignores multi-mappers (no -M flag). Keep false.
   use_filtered_bam: false
   feature_type: "exon"
   attribute: "gene_name"

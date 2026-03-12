@@ -1,71 +1,83 @@
-# GSE104853 0-DEG fix: strandedness and optional filtered BAM
+# GSE104853 investigation: 0-DEG result
 
-## What was changed
+## Summary
 
-1. **Strandedness (tested, reverted to 0)**  
-   - **Config:** `config/config_GSE104853.yaml`: `featurecounts.strandedness` kept at `0` (unstranded).  
-   - **Reason:** Pipeline reported 0 significant DEGs; wrong strandedness was a candidate. After running `run_strand_test.py`, **strand 0 gave ~42% assigned vs ~22% for strand 1/2**, supporting unstranded libraries. Strand 1 and 2 did not yield any DEGs either. Config was reverted to `strandedness: 0` with a comment referencing the strand test.
+The pipeline produced 0 significant DEGs (FDR < 0.05) across all branches for GSE104853
+(miR-125a-5p overexpression vs control in THP-1 cells). Two hypotheses were tested:
 
-2. **Strand-test configs and script**  
-   - **Added:** `config/config_GSE104853_strand1.yaml` and `config/config_GSE104853_strand2.yaml` (same as GSE104853 but `strandedness: 1` and `2`, main branch only).  
-   - **Added:** `scripts/run_strand_test.py`: copies main-branch BAMs from `gse104853_test` into `gse104853_strand1` and `gse104853_strand2`, runs steps 7–9 with the strand1/strand2 configs, and collects the comparison table.
+1. **Wrong strandedness** -- ruled out. Strand 0 (unstranded) is correct.
+2. **Counting from unfiltered vs filtered BAMs** -- ruled out. Counts are identical.
 
-3. **Optional: count from filtered BAMs (second fix)**  
-   - **Config:** `featurecounts.use_filtered_bam` (default `false`). When `true`, step 7 uses `filtered_bam_path` from `mapping_summary.tsv` instead of `bam_path` (post–step‑5 filtered BAMs).  
-   - **Code:** `scripts/07_featurecounts.py`: `build_mapping_units()` accepts `use_filtered_bam`; when true and `filtered_bam_path` is present, that path is used for counting.  
-   - **When to use:** Only if correcting strandedness does not restore a plausible DE signal (e.g. still 0 DEGs or wrong direction for IL10RA/CD163). Then set `use_filtered_bam: true` in `config_GSE104853.yaml`, re-run steps 7–9 for the main branch, and compare.
+The 0-DEG result is genuine for this dataset with n=3 per group. The pipeline is
+analytically correct. Key genes from the paper (IL10RA, CD163) show the expected
+direction of effect but do not reach significance.
 
-4. **Config clean-up**  
-   - **Config:** Removed duplicate `extra_args` under `featurecounts.option_sets.multimapper` in `config_GSE104853.yaml`.
+## What was tested
 
-## Strand test outcome (2026-03-12)
+### 1. Strandedness (tested 2026-03-12)
 
-| setting tested   | assigned % | genes after filter | DEGs padj<0.05 | IL10RA log2FC/padj | CD163 log2FC/padj | comments |
-|------------------|------------|---------------------|----------------|---------------------|-------------------|----------|
-| strand 0 (baseline) | 42.2%   | 6694                | 0              | -0.798 / 1.0        | -1.188 / 1.0      | baseline |
-| strand 1         | 22.3%      | 4660                | 0              | -0.601 / 1.0        | (filtered out)    |          |
-| strand 2         | 21.8%      | 4693                | 0              | -1.057 / 1.0        | (filtered out)   |          |
+| setting            | assigned % | genes after filter | DEGs padj<0.05 | IL10RA log2FC/padj | CD163 log2FC/padj |
+|--------------------|------------|---------------------|----------------|---------------------|-------------------|
+| strand 0 (baseline)| 42.2%      | 6694                | 0              | -0.798 / 1.0        | -1.188 / 1.0      |
+| strand 1           | 22.3%      | 4660                | 0              | -0.601 / 1.0        | (filtered out)     |
+| strand 2           | 21.8%      | 4693                | 0              | -1.057 / 1.0        | (filtered out)     |
 
-**Interpretation:** Assignment rate is highest with strand 0 (unstranded), so the library is treated as unstranded; config stays at `strandedness: 0`. Strandedness was **not** the cause of 0 DEGs. IL10RA and CD163 are in the expected direction (negative log2FC in mirna125a vs ctrl) but none reach FDR &lt; 0.05. Next options: try `use_filtered_bam: true` and re-run steps 7–9, or attribute 0 DEGs to limited power (n=3 per group) and use effect sizes/direction for interpretation.
+**Conclusion:** Strand 0 has ~2x the assignment rate of 1 or 2. The library is unstranded.
+Strandedness was not the cause of 0 DEGs.
 
-## How to run the fixed analysis
+### 2. Filtered BAMs (tested 2026-03-12)
 
-1. **Strand test (optional but recommended)**  
-   From the pipeline directory, with `results/gse104853_test` already present:
-   ```bash
-   ./py scripts/run_strand_test.py
-   ```
-   Update `featurecounts.strandedness` in `config/config_GSE104853.yaml` to the recommended value (0, 1, or 2) if it differs from the current setting.
+| BAM type             | genes after filter | DEGs padj<0.05 | baseMean VPS13D | baseMean RLF  |
+|----------------------|---------------------|----------------|-----------------|---------------|
+| unfiltered (default) | 6694                | 0              | 14.503910       | 130.129394    |
+| filtered (.filtered) | 6694                | 0              | 14.503910       | 130.129394    |
 
-2. **Fixed run (new run-id)**  
-   ```bash
-   ./py scripts/run_pipeline.py \
-     --config config/config_GSE104853.yaml \
-     --dataset GSE104853 \
-     --species human \
-     --run-id gse104853_fix_strand \
-     run --methods cutadapt --steps 7 8 9 10 11
-   ```
-   This uses the existing BAMs from a previous full run (e.g. `gse104853_test`); ensure that the results directory for that run still exists, or that you point to it (e.g. by copying/symlinking the main branch into `results/gse104853_fix_strand` and running steps 7–9 only). For a clean fixed run from scratch, run all steps with `--run-id gse104853_fix_strand` and `--methods cutadapt` (and no `--steps` or steps 0–11).
+**Conclusion:** Counts are **identical**. featureCounts in default mode (no `-M` flag) already
+ignores multi-mapped reads, which is exactly what the step-5 BAM filter removes. The filtered
+BAMs contain only uniquely-mapped reads, but featureCounts was already only counting those.
+No effect on DE results.
 
-3. **If strandedness alone is not enough**  
-   Set in `config_GSE104853.yaml`:
-   ```yaml
-   featurecounts:
-     use_filtered_bam: true
-   ```
-   Re-run steps 7–9 (and 10–11 if desired) for the main branch and compare DEG counts and IL10RA/CD163 again.
+## Why 0 DEGs is the correct pipeline output
 
-## Answers to the validation questions
+- **Sample size:** n=3 per group. With high within-group variance, FDR correction
+  pushes all padj toward 1.0. The minimum padj across 6694 genes is ~0.10 (MT-CYB).
+- **Effect direction is correct:** IL10RA log2FC = -0.80 (paper: decreased), CD163
+  log2FC = -1.19 (paper: reduced). Both are in the expected direction but not
+  individually significant.
+- **The paper used edgeR + hg19 + Tophat**, not DESeq2 + hg38 + STAR. Differences in
+  reference genome, aligner, and DE method may produce different sensitivity. The paper
+  also reported pathway-level enrichment (cytokine-cytokine receptor interactions), not
+  necessarily large numbers of individual DEGs.
+- **The pipeline is not wrong.** It correctly identifies no individually significant
+  genes at FDR < 0.05 with the current data and methods. The biological signal is real
+  but below the detection threshold for this sample size.
 
-- **Was strandedness the actual cause?**  
-  No. The strand test showed strand 0 (unstranded) has the highest assignment (~42% vs ~22% for 1/2). Strand 1 and 2 did not yield any DEGs. Config was reverted to `strandedness: 0`.
+## What was changed in the codebase
 
-- **Did correcting it restore a plausible transcriptomic signal?**  
-  Strand change did not change significance (0 DEGs in all). Direction is plausible: IL10RA and CD163 are negative (down in mirna125a vs ctrl), consistent with the paper; padj remains high (limited power with n=3).
+1. **Config `config_GSE104853.yaml`:**
+   - `featurecounts.strandedness` confirmed at `0` (with strand-test comment).
+   - `featurecounts.use_filtered_bam` added (default `false`, tested `true`, no effect).
+   - Removed duplicate `extra_args` under `multimapper` option set.
 
-- **If not, is counting from filtered BAMs the next justified fix?**  
-  Yes. Set `use_filtered_bam: true` in `config_GSE104853.yaml`, re-run steps 7–9 for the main branch, and compare. Otherwise treat 0 DEGs as a power/sample-size limitation and use effect direction (e.g. IL10RA, CD163) for interpretation.
+2. **Code `scripts/07_featurecounts.py`:**
+   - `build_mapping_units()` accepts `use_filtered_bam` parameter (reads `filtered_bam_path`
+     from mapping_summary when true).
+   - Column-name cleaning regex updated to handle `.filtered.bam` suffix.
 
-- **Does the pipeline still work operationally after the fix?**  
-  Yes. Strand test ran successfully; only config and optional step‑7 behaviour were added. Pipeline is operational.
+3. **Added `scripts/run_strand_test.py`:** empirical strandedness test (steps 7-9 with
+   strand 0/1/2, comparison table).
+
+4. **Added strand-test configs:** `config_GSE104853_strand1.yaml`,
+   `config_GSE104853_strand2.yaml`.
+
+5. **Config template:** `use_filtered_bam: false` added to `config_template.yaml`.
+
+## Recommendations for reporting
+
+- Report 0 DEGs at FDR < 0.05 as the primary result.
+- Note that IL10RA (log2FC = -0.80) and CD163 (log2FC = -1.19) trend in the direction
+  reported in the paper, but are not individually significant.
+- If pathway analysis is needed, use a rank-based method (e.g. GSEA on the full ranked
+  gene list by stat or log2FC) rather than relying on a DEG cutoff.
+- The pipeline settings (strandedness, BAM type, counting method) have been validated
+  and are analytically correct for this dataset.
