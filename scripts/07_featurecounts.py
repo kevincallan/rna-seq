@@ -221,7 +221,8 @@ def clean_count_matrix(raw_path: Path, clean_path: Path, samples: list) -> None:
                 header = ["Geneid"]
                 for col in parts[6:]:
                     name = Path(col).name
-                    name = re.sub(r"_?Aligned\.sortedByCoord\.out\.bam$", "", name)
+                    name = re.sub(r"_?Aligned\.sortedByCoord\.out(?:\.filtered)?\.bam$", "", name)
+                    name = re.sub(r"\.filtered\.bam$", "", name)
                     name = re.sub(r"\.bam$", "", name)
                     name = name.rstrip("_")
                     header.append(name)
@@ -450,7 +451,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                 for raw_sname in raw_sample_names:
                     clean_sname = Path(raw_sname).name
                     clean_sname = re.sub(
-                        r"_?Aligned\.sortedByCoord\.out\.bam$", "", clean_sname
+                        r"_?Aligned\.sortedByCoord\.out(?:\.filtered)?\.bam$", "", clean_sname
                     )
                     clean_sname = clean_sname.rstrip("_")
                     row_data: Dict[str, str] = {
