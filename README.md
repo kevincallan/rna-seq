@@ -1,10 +1,10 @@
 # RNA-seq Analysis Pipeline
 
-A config-driven, end-to-end RNA-seq pipeline for differential expression analysis. Designed for exam-day use on the university JupyterHub server. Produces QC reports, count matrices, DE results with statistical tables, publication-quality figures, and gene lists ready for functional enrichment analysis.
+A config-driven, end-to-end RNA-seq pipeline for differential expression analysis. Runs on the university JupyterHub server. Produces QC reports, count matrices, DE results with statistical tables, publication-quality figures, and gene lists ready for functional enrichment analysis.
 
 ---
 
-## Exam Day Quick Start
+## Quick Start
 
 ```bash
 cd ~/rna-seq-pipeline
@@ -20,7 +20,7 @@ cd ~/rna-seq-pipeline
 3. Validate that files exist and FASTQ filenames match metadata run IDs
 4. Run all 12 steps: QC, trimming, mapping, counting, filtering, DE analysis, plots, and report generation
 
-On exam day, only the dataset accession changes. Everything else (references, parameters, tool paths) is already configured.
+For a new dataset, only the dataset accession and config need to change. References, tool paths, and pipeline logic are already configured.
 
 ---
 
@@ -65,9 +65,33 @@ All steps are automated and config-driven. The pipeline compares multiple trimmi
 
 ---
 
+## Running BigWig Generation Separately
+
+Step 6 (BigWig coverage tracks) is the slowest step in the pipeline -- it generates genome browser tracks for every combination of trim method, mapper option, and sample. It is **not required** for counting, differential expression, or the analysis report. Steps 7-11 do not depend on BigWig output.
+
+The recommended workflow is to run the core analysis first (skipping step 6), review results, and then generate BigWigs only if needed for IGV visualization:
+
+```bash
+# 1. Run core analysis (everything except BigWig):
+./py scripts/run_pipeline.py --dataset GSEXXXXX --run-id my_analysis \
+    run --steps 0 1 2 3 4 5 7 8 9 10 11
+
+# 2. Review DE results, write report while BigWigs generate in background
+
+# 3. Generate BigWigs later against the same run directory:
+./py scripts/run_pipeline.py --dataset GSEXXXXX --run-id my_analysis \
+    run --steps 6
+```
+
+The `--run-id` flag is required when running step 6 later so it finds the existing BAMs and `mapping_summary.tsv` in the correct results directory. Without it, the pipeline would create a new timestamped directory and fail to find the mapping outputs.
+
+BigWig files that already exist are skipped automatically. Use `--force` to regenerate them.
+
+---
+
 ## Command-Line Options
 
-### Data pointer (change on exam day)
+### Data pointer
 
 | Flag | Default | Purpose |
 |------|---------|---------|
@@ -83,17 +107,24 @@ All steps are automated and config-driven. The pipeline compares multiple trimmi
 | Flag | Purpose |
 |------|---------|
 | `--config path` | Path to config YAML (default: `config/config.yaml`) |
-| `--run-id ID` | Override the auto-generated run ID |
+| `--run-id ID` | Override the auto-generated run ID (required when re-running specific steps against existing results) |
 | `run --steps 0 1 2 5` | Run only specific steps |
 | `run --methods none cutadapt` | Override which trimming methods to run |
 | `run --subset day3` | Use a specific subset filter from config |
 | `run --threads N` | Override thread count |
+| `run --force` | Regenerate outputs that already exist (e.g. BigWig files) |
 
 ### Examples
 
 ```bash
 # Full pipeline with dataset pointer:
 ./py scripts/run_pipeline.py --dataset GSE48519 run
+
+# Core analysis only (skip BigWig -- recommended for faster iteration):
+./py scripts/run_pipeline.py --dataset GSE48519 --run-id my_run run --steps 0 1 2 3 4 5 7 8 9 10 11
+
+# Generate BigWig tracks later from existing results:
+./py scripts/run_pipeline.py --dataset GSE48519 --run-id my_run run --steps 6
 
 # Just QC steps:
 ./py scripts/run_pipeline.py --dataset GSE48519 run --steps 0 1 2 3 4
@@ -403,35 +434,50 @@ Using more than the minimum 2 replicates increases statistical power. The pipeli
 
 ---
 
-## Exam-Day Workflow
+## Workflow for a New Dataset
 
-1. **Receive** your dataset ID (e.g., `GSE12345`), subset assignment, and metadata CSV
-2. **Edit** `config/config.yaml`:
-   - Update `column_mapping` if the metadata CSV has different column names
-   - Update `condition_map` to map raw condition values to short names
-   - Update `subset_filters` to define your assigned subset
-   - Update `comparisons` to define your contrast (numerator vs denominator)
-   - Update `deseq2.reference_level` to set the control condition
-3. **Run**:
+1. **Inspect** the metadata CSV to identify column names and condition values:
+
+```bash
+./py scripts/inspect_metadata.py /data/GSEXXXXX/metadata.csv
+```
+
+2. **Configure** -- copy the template and fill in the fields:
+
+```bash
+cp config/config_template.yaml config/config_GSEXXXXX.yaml
+```
+
+   Update:
+   - `column_mapping.run_id_col` and `condition_cols` to match the CSV
+   - `condition_map` to map raw condition values to short names
+   - `subset_filters` if the CSV contains mixed assay types
+   - `comparisons` to define your contrast (numerator vs denominator)
+   - `deseq2.reference_level` to set the control condition
+
+3. **Run** the core analysis (skip BigWig for speed):
 
 ```bash
 cd ~/rna-seq-pipeline
-./py scripts/run_pipeline.py --dataset GSE12345 run
+./py scripts/run_pipeline.py --config config/config_GSEXXXXX.yaml \
+    --dataset GSEXXXXX --run-id my_analysis \
+    run --steps 0 1 2 3 4 5 7 8 9 10 11
 ```
 
 4. **Collect outputs** from `results/<run_id>/`:
-   - Figures for report: `pca.pdf`, `volcano.pdf`, `ma_plot.pdf` (choose best 4)
+   - Figures: `pca.pdf`, `volcano.pdf`, `ma_plot.pdf`
    - Tables: `de_significant.tsv` (top genes), `mapping_summary.tsv` (QC stats)
-   - Gene list: `top_genes_for_enrichment.txt` --> paste into g:Profiler
+   - Gene list: `top_genes_for_enrichment.txt` -- paste into g:Profiler
+
 5. **Run enrichment** analysis in browser (g:Profiler / Enrichr)
-6. **Write** 800-1200 word report with 4 figures
 
-### Report structure suggestion
+6. **Generate BigWigs** later if IGV visualization is needed:
 
-1. **Introduction**: Dataset description, biological question, experimental design
-2. **Methods**: Pipeline overview (QC, mapping, counting, DE method, parameters used)
-3. **Results**: Key figures (PCA showing sample grouping, volcano plot showing DE landscape), top DE genes table, enrichment findings
-4. **Discussion**: Compare with published findings, discuss parameter effects, note limitations
+```bash
+./py scripts/run_pipeline.py --config config/config_GSEXXXXX.yaml \
+    --dataset GSEXXXXX --run-id my_analysis \
+    run --steps 6
+```
 
 ---
 
@@ -444,7 +490,7 @@ README.md                        # This file
 config/
   config.yaml                    # Mouse GSE48519 configuration
   config_GSE104853.yaml          # Human miRNA-125a configuration (worked example)
-  config_template.yaml           # Exam-day blank template (copy + fill in)
+  config_template.yaml           # Blank template for new datasets (copy + fill in)
 env/
   environment.yml                # Conda environment spec
   requirements.txt               # pip requirements
@@ -454,7 +500,7 @@ src/
   reporting.py                   # Markdown/HTML report builder
 scripts/
   run_pipeline.py                # Orchestrator
-  inspect_metadata.py            # Metadata CSV inspector (exam-day helper)
+  inspect_metadata.py            # Metadata CSV inspector (suggests config from any SRA CSV)
   00_validate_env.py             # Environment validation
   01_prepare_samples.py          # Metadata parsing + sample prep
   02_trim_reads.py               # Read trimming
