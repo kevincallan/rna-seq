@@ -129,10 +129,13 @@ trimming:
 # attribute: "gene_name" produces human-readable gene symbols in DE output.
 # gtf_filter: "gene_name" pre-filters the GTF to rows containing gene_name
 #   (matches the notebook's zgrep step).
-# strandedness: 0 = unstranded (matches the notebook's default).
+# strandedness: 0=unstranded, 1=stranded, 2=reverse-stranded.
+# Set to 2 (reverse-stranded) as fix for 0-DEG result; validate with scripts/run_strand_test.py.
+# use_filtered_bam: if true, count from step-5 filtered BAMs (try only if strand fix insufficient).
 featurecounts:
   backend: "featurecounts"
-  strandedness: 0
+  strandedness: 2
+  use_filtered_bam: false
   feature_type: "exon"
   attribute: "gene_name"
   gtf_filter: "gene_name"
@@ -165,7 +168,6 @@ featurecounts:
       P: false
       C: false
       Q: 0
-      extra_args: ""
       extra_args: ""
 
 # -- Matrix filtering ---------------------------------------------------------

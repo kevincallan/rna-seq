@@ -129,9 +129,11 @@ trimming:
 # attribute: "gene_id" for Ensembl IDs; "gene_name" for gene symbols.
 # gtf_filter: set to "gene_name" if attribute is "gene_name" (filters GTF).
 # strandedness: 0=unstranded, 1=stranded, 2=reverse-stranded.
+# use_filtered_bam: if true, count from step-5 filtered BAMs (default false).
 featurecounts:
   backend: "featurecounts"
   strandedness: 0                                # EXAM: check dataset protocol
+  use_filtered_bam: false
   feature_type: "exon"
   attribute: "gene_id"                           # EXAM: "gene_id" or "gene_name"
   gtf_filter: ""                                 # set to "gene_name" if attribute is gene_name

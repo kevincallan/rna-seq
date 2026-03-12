@@ -257,8 +257,13 @@ def build_mapping_units(
     results_dir: Path,
     samples: list,
     methods: List[str],
+    use_filtered_bam: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Collect mapping units from mapping_summary.tsv (or legacy STAR layout)."""
+    """Collect mapping units from mapping_summary.tsv (or legacy STAR layout).
+
+    If use_filtered_bam is True and mapping_summary has filtered_bam_path,
+    use that instead of bam_path for counting (post-step-5 filtered BAMs).
+    """
     mapping_summary = results_dir / "mapping_summary.tsv"
     units: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
 
@@ -271,6 +276,8 @@ def build_mapping_units(
                 mapper_opt = row.get("mapper_option_set", "default")
                 sample = row.get("sample", "")
                 bam_path = row.get("bam_path", "")
+                if use_filtered_bam and row.get("filtered_bam_path"):
+                    bam_path = row.get("filtered_bam_path", "")
                 if method not in methods or not sample or not bam_path:
                     continue
                 key = (method, mapper, mapper_opt)
@@ -365,7 +372,12 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     logger.info("Counting backend: %s", backend)
 
     all_summary_rows: List[Dict[str, str]] = []
-    mapping_units = build_mapping_units(results_dir, samples, methods)
+    use_filtered_bam = cfg.get("featurecounts", {}).get("use_filtered_bam", False)
+    if use_filtered_bam:
+        logger.info("Using filtered BAMs for counting (featurecounts.use_filtered_bam=true)")
+    mapping_units = build_mapping_units(
+        results_dir, samples, methods, use_filtered_bam=use_filtered_bam
+    )
 
     for unit in mapping_units:
         method = unit["method"]

@@ -1,0 +1,117 @@
+# Strandedness test: -s 1 (stranded). Copy of config_GSE104853 with featurecounts.strandedness: 1.
+# Use with: --config config/config_GSE104853_strand1.yaml for empirical strand testing.
+
+project:
+  name: "GSE104853_miRNA125a"
+  results_dir: "results"
+  work_dir: "work"
+  logs_dir: "logs"
+  threads: 6
+
+data:
+  metadata_csv: "/data/GSE104853/metadata.csv"
+  fastq_dir: "/data/GSE104853"
+  layout: "paired"
+
+column_mapping:
+  run_id_col: "Run"
+  condition_cols:
+    - "treatment"
+  condition_map:
+    "transfected with negative control microRNA mimic": "Ctrl"
+    "transfected with miR-125a-5p mimic": "miRNA125a"
+  replicate_strategy: "sorted_run_id"
+
+subset_filters:
+  default:
+    "Assay Type": "RNA-Seq"
+active_subset: "default"
+
+references:
+  genome_index: "/data/indices/hg38/star"
+  gtf: "/data/genomes/human/hg38/Homo_sapiens.GRCh38.115.chr.gtf.gz"
+  genome_fasta: "/data/genomes/human/hg38/hg38.fa"
+
+tools:
+  fastqc: "fastqc"
+  multiqc: "multiqc"
+  cutadapt: "cutadapt"
+  fastp: "fastp"
+  trimmomatic: "trimmomatic"
+  star: "STAR"
+  hisat2: "hisat2"
+  samtools: "samtools"
+  featurecounts: "featureCounts"
+  bamcoverage: "bamCoverage"
+
+mapping:
+  backends:
+    star:
+      enabled: true
+      genome_index: "/data/indices/hg38/star"
+      option_sets:
+        default:
+          outFilterMultimapNmax: 20
+          extra_args: ""
+    hisat2:
+      enabled: false
+      index_prefix: ""
+      option_sets:
+        default:
+          extra_args: ""
+
+star_params:
+  outSAMtype: "BAM SortedByCoordinate"
+  readFilesCommand: "zcat"
+  outFilterMultimapNmax: 20
+  extra_args: ""
+
+trimming:
+  none:
+    enabled: false
+  cutadapt:
+    enabled: true
+    adapter_fwd: "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"
+    adapter_rev: "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"
+    quality: 20
+    min_length: 25
+    extra_args: ""
+  fastp:
+    enabled: false
+  trimmomatic:
+    enabled: false
+
+featurecounts:
+  backend: "featurecounts"
+  strandedness: 1
+  feature_type: "exon"
+  attribute: "gene_name"
+  gtf_filter: "gene_name"
+  option_sets:
+    default:
+      label: "Default"
+      B: false
+      P: false
+      C: false
+      Q: 0
+      extra_args: ""
+
+filtering:
+  min_max_count: "auto"
+
+deseq2:
+  fdr_threshold: 0.05
+  lfc_threshold: 0.0
+  method: "pydeseq2"
+  reference_level: "ctrl"
+
+comparisons:
+  - name: "mirna125a_vs_ctrl"
+    numerator: "mirna125a"
+    denominator: "ctrl"
+
+bigwig:
+  normalization: "CPM"
+  mapq_filter: 255
+  bin_size: 50
+  use_deseq2_sizefactors: true
