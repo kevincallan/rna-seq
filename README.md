@@ -62,7 +62,7 @@ You can also select individual steps with `--steps`:
 ```
 Raw FASTQs
   --> Quality control (FastQC / MultiQC)
-  --> Adapter trimming (cutadapt, with untrimmed baseline)
+  --> Trimming (primary method by default; optional method comparison)
   --> Read mapping to reference genome (STAR and/or HISAT2)
   --> Read counting per gene (featureCounts, all configured option sets)
   --> Low-expression gene filtering (all option sets)
@@ -73,7 +73,7 @@ Raw FASTQs
   --> Final summary report with pipeline health checks
 ```
 
-All steps are automated and config-driven. The pipeline compares multiple trimming approaches and featureCounts parameter sets side-by-side, runs DE for each, and selects a primary analysis branch.
+All steps are automated and config-driven. By default the pipeline runs a single primary trim method; optional trim-method comparison can be enabled explicitly in config.
 
 ---
 
@@ -83,7 +83,7 @@ All steps are automated and config-driven. The pipeline compares multiple trimmi
 |------|--------|-------------|-------------|
 | 0 | `00_validate_env` | Validate environment, tools, paths | `run_manifest.json` |
 | 1 | `01_prepare_samples` | Parse metadata, apply subset filters, create symlinks | `samples.tsv` |
-| 2 | `02_trim_reads` | Run each enabled trimming method | Trimmed FASTQs, `trimming_summary.tsv` |
+| 2 | `02_trim_reads` | Run effective trimming methods (`primary_method` plus optional comparisons) | Trimmed FASTQs, `trimming_summary.tsv` |
 | 3 | `03_qc_fastqc` | FastQC on raw and trimmed reads | FastQC HTML reports |
 | 4 | `04_multiqc` | Aggregate FastQC into MultiQC | MultiQC HTML reports |
 | 5 | `05_map_star` | Align reads (STAR/HISAT2), validate BAM integrity, then index BAMs | Sorted/indexed BAMs, `mapping_summary.tsv` |
@@ -163,6 +163,24 @@ For backward compatibility, `selected_analysis.tsv` is still written and mirrors
 ./py scripts/run_strand_test.py --config config/config.yaml \
     --dataset GSE48519 --species mouse
 ```
+
+---
+
+## Trimming Configuration Model
+
+`trimming` uses explicit selection fields:
+
+- `primary_method`: required, always included
+- `compare_methods`: when `true`, also run `comparison_methods`
+- `comparison_methods`: ordered list, deduplicated with primary preserved first
+
+Template defaults are exam-friendly:
+
+- `primary_method: cutadapt`
+- `compare_methods: false`
+- `comparison_methods: []`
+
+Cutadapt adapters are dataset-specific and optional (`adapter_fwd` / `adapter_rev` may be blank). Blank adapters run quality/min-length trimming only.
 
 ---
 

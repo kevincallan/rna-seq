@@ -25,7 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.utils import (
     ensure_dirs,
-    get_enabled_methods,
+    get_effective_trim_methods,
+    get_trim_config_summary,
     get_run_id,
     load_config,
     resolve_results_dir,
@@ -519,7 +520,8 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     logger.info("=" * 60)
 
     results_dir = Path(cfg["_results_dir"])
-    methods = methods_override or get_enabled_methods(cfg)
+    methods = get_effective_trim_methods(cfg, methods_override)
+    trim_cfg = get_trim_config_summary(cfg)
     option_sets = cfg["featurecounts"].get("option_sets", {"default": {}})
 
     units = infer_analysis_units_from_de_summary(results_dir, methods)
@@ -548,6 +550,16 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
 
     lines: List[str] = []
     lines.append("# Method and Parameter Comparison")
+    lines.append("")
+    lines.append("## Trimming Configuration")
+    lines.append(f"- Primary trim method: `{trim_cfg['primary_method']}`")
+    lines.append(f"- Trim comparison enabled: `{trim_cfg['compare_methods']}`")
+    lines.append(f"- Effective trim methods: `{', '.join(trim_cfg['effective_methods'])}`")
+    if trim_cfg["non_selected_methods"]:
+        lines.append(
+            "- Intentionally not run (trim comparison disabled/excluded): "
+            f"`{', '.join(trim_cfg['non_selected_methods'])}`"
+        )
     lines.append("")
     lines.append("## Selection Outcomes")
     lines.append(f"- Selected count-comparison branch: `{selected_count.label if selected_count else 'N/A'}` ({count_reason})")
@@ -623,6 +635,34 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     lines.append(
         f"- Visualisation selection prioritises `none/star/strict_unique/default` for unique-mapper BigWig generation; chosen: `{selected_vis.label if selected_vis else 'N/A'}`."
     )
+
+    lines.append("")
+    lines.append("## Trimming Impact Summary")
+    if trim_cfg["compare_methods"] and len(trim_cfg["effective_methods"]) > 1:
+        by_method: Dict[str, Dict[str, float]] = defaultdict(
+            lambda: {"n": 0.0, "uniq": 0.0, "assigned": 0.0, "de_sig": 0.0}
+        )
+        for au in units:
+            m = metrics[au]
+            by_method[au.method]["n"] += 1
+            by_method[au.method]["uniq"] += _mean(m["uniq_vals"])
+            by_method[au.method]["assigned"] += _mean(m["assigned_vals"])
+            by_method[au.method]["de_sig"] += float(m["de_sig"])
+        lines.append("| Trim Method | Mean uniquely mapped % | Mean assigned % | Mean DE significant genes |")
+        lines.append("|-------------|------------------------|------------------|---------------------------|")
+        for method in trim_cfg["effective_methods"]:
+            stats = by_method.get(method, {"n": 0.0, "uniq": 0.0, "assigned": 0.0, "de_sig": 0.0})
+            n = stats["n"] if stats["n"] > 0 else 1.0
+            lines.append(
+                f"| {method} | {stats['uniq']/n:.2f} | {stats['assigned']/n:.2f} | {stats['de_sig']/n:.2f} |"
+            )
+        lines.append(
+            "Trim comparison was enabled; table above summarizes material differences in QC/mapping/counting/DE outcomes."
+        )
+    else:
+        lines.append(
+            "Trim comparison was disabled for this run; non-primary trim methods were intentionally not run."
+        )
 
     report_path = report_dir / "method_comparison.md"
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

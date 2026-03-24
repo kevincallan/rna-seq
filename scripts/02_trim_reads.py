@@ -20,7 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.metadata import Sample, read_samples_tsv
 from src.utils import (
     ensure_dirs,
-    get_enabled_methods,
+    get_effective_trim_methods,
+    get_trim_config_summary,
     get_run_id,
     load_config,
     resolve_results_dir,
@@ -30,6 +31,16 @@ from src.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _cutadapt_mode(adapter_fwd: str, adapter_rev: str, quality: int, min_length: int) -> str:
+    has_adapter = bool(adapter_fwd.strip() or adapter_rev.strip())
+    quality_active = int(quality) > 0 or int(min_length) > 0
+    if has_adapter and quality_active:
+        return "adapter+quality"
+    if has_adapter:
+        return "adapter-only"
+    return "quality-only"
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +76,7 @@ def _trim_none(sample: Sample, work_dir: Path) -> Dict[str, Any]:
     metrics["reads_in"] = "unchanged"
     metrics["reads_out"] = "unchanged"
     metrics["bases_trimmed"] = "0"
+    metrics["trim_mode"] = "none_passthrough"
     return metrics
 
 
@@ -84,6 +96,12 @@ def _trim_cutadapt(
     metrics: Dict[str, Any] = {"method": "cutadapt", "sample": sample.sample_name}
 
     exe = cfg["tools"].get("cutadapt", "cutadapt")
+    adapter_fwd = str(params.get("adapter_fwd", "")).strip()
+    adapter_rev = str(params.get("adapter_rev", "")).strip()
+    quality = int(params.get("quality", 20))
+    min_length = int(params.get("min_length", 25))
+    trim_mode = _cutadapt_mode(adapter_fwd, adapter_rev, quality, min_length)
+    logger.info("  cutadapt mode for %s: %s", sample.sample_name, trim_mode)
 
     if sample.layout == "paired":
         in1 = link_dir / f"{sample.sample_name}_1.fastq.gz"
@@ -93,26 +111,30 @@ def _trim_cutadapt(
 
         cmd = [
             exe,
-            "-a", params.get("adapter_fwd", "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"),
-            "-A", params.get("adapter_rev", "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"),
-            "-q", str(params.get("quality", 20)),
-            "-m", str(params.get("min_length", 25)),
+            "-q", str(quality),
+            "-m", str(min_length),
             "-o", str(out1),
             "-p", str(out2),
             str(in1), str(in2),
         ]
+        if adapter_fwd:
+            cmd[1:1] = ["-a", adapter_fwd]
+        if adapter_rev:
+            insert_at = 1 if not adapter_fwd else 3
+            cmd[insert_at:insert_at] = ["-A", adapter_rev]
     else:
         in1 = link_dir / f"{sample.sample_name}.fastq.gz"
         out1 = out_dir / f"{sample.sample_name}.fastq.gz"
 
         cmd = [
             exe,
-            "-a", params.get("adapter_fwd", "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"),
-            "-q", str(params.get("quality", 20)),
-            "-m", str(params.get("min_length", 25)),
+            "-q", str(quality),
+            "-m", str(min_length),
             "-o", str(out1),
             str(in1),
         ]
+        if adapter_fwd:
+            cmd[1:1] = ["-a", adapter_fwd]
 
     # Add extra args
     extra = params.get("extra_args", "")
@@ -137,6 +159,7 @@ def _trim_cutadapt(
         combined_log,
         ["Quality-trimmed", "Bases trimmed"],
     )
+    metrics["trim_mode"] = trim_mode
 
     # Save log
     log_path = log_dir / f"{sample.sample_name}.cutadapt.log"
@@ -244,6 +267,7 @@ def _trim_fastp(
         metrics["reads_out"] = "N/A"
         metrics["bases_trimmed"] = "N/A"
 
+    metrics["trim_mode"] = "adapter+quality" if params.get("detect_adapter", True) else "quality-only"
     return metrics
 
 
@@ -313,6 +337,7 @@ def _trim_trimmomatic(
     metrics["reads_in"] = "see_log"
     metrics["reads_out"] = "see_log"
     metrics["bases_trimmed"] = "see_log"
+    metrics["trim_mode"] = "adapter+quality"
     return metrics
 
 
@@ -350,8 +375,14 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         else:
             s.r1 = str(link_dir / f"{s.sample_name}.fastq.gz")
 
-    methods = methods_override or get_enabled_methods(cfg)
-    logger.info("Trimming methods: %s", methods)
+    methods = get_effective_trim_methods(cfg, methods_override)
+    trim_cfg = get_trim_config_summary(cfg)
+    logger.info(
+        "Trim config: primary=%s compare_methods=%s effective=%s",
+        trim_cfg["primary_method"],
+        trim_cfg["compare_methods"],
+        ",".join(methods),
+    )
 
     all_metrics: List[Dict[str, Any]] = []
 
@@ -380,7 +411,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
 def _write_trim_summary(metrics: List[Dict[str, Any]], path: Path) -> None:
     """Write trimming metrics to TSV."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fields = ["method", "sample", "reads_in", "reads_out", "bases_trimmed"]
+    fields = ["method", "sample", "trim_mode", "reads_in", "reads_out", "bases_trimmed"]
     with open(path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields, delimiter="\t",
                                 extrasaction="ignore")

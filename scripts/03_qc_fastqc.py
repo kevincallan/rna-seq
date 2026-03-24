@@ -18,7 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.metadata import read_samples_tsv
 from src.utils import (
     ensure_dirs,
-    get_enabled_methods,
+    get_effective_trim_methods,
+    get_trim_config_summary,
     get_run_id,
     load_config,
     resolve_results_dir,
@@ -67,7 +68,14 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     samples_tsv = Path(cfg.get("_samples_tsv", results_dir / "samples.tsv"))
     samples = read_samples_tsv(samples_tsv)
 
-    methods = methods_override or get_enabled_methods(cfg)
+    methods = get_effective_trim_methods(cfg, methods_override)
+    trim_cfg = get_trim_config_summary(cfg)
+    logger.info(
+        "Trim config: primary=%s compare_methods=%s effective=%s",
+        trim_cfg["primary_method"],
+        trim_cfg["compare_methods"],
+        ",".join(methods),
+    )
 
     # --- FastQC on raw (linked) FASTQs --------------------------------------
     logger.info("Running FastQC on raw reads...")

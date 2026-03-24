@@ -20,7 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.metadata import read_samples_tsv
 from src.reporting import MarkdownReport, render_html
 from src.utils import (
-    get_enabled_methods,
+    get_effective_trim_methods,
+    get_trim_config_summary,
     get_run_id,
     load_config,
     resolve_results_dir,
@@ -65,7 +66,7 @@ def _infer_methods_from_outputs(results_dir: Path, cfg: Dict[str, Any]) -> List[
                 methods.add(p.name)
 
     if not methods:
-        methods.update(get_enabled_methods(cfg))
+        methods.update(get_effective_trim_methods(cfg))
 
     return sorted(methods)
 
@@ -117,10 +118,11 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     logger.info("=" * 60)
 
     results_dir = Path(cfg["_results_dir"])
-    methods = methods_override or _infer_methods_from_outputs(results_dir, cfg)
+    methods = get_effective_trim_methods(cfg, methods_override)
     analysis_units = infer_analysis_units_from_de_summary(results_dir, methods)
     comparisons = cfg.get("comparisons", [])
     project_name = cfg["project"]["name"]
+    trim_cfg = get_trim_config_summary(cfg)
 
     selected_count = read_selected_count_comparison(results_dir)
     selected_vis = read_selected_visualisation(results_dir)
@@ -159,7 +161,32 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
 
     # === Trimming summary ===================================================
     rpt.h2("Trimming Summary")
-    rpt.paragraph(f"Methods compared: {', '.join(methods)}")
+    rpt.paragraph(f"**Primary trim method:** `{trim_cfg['primary_method']}`")
+    rpt.paragraph(f"**Trim-method comparison enabled:** `{trim_cfg['compare_methods']}`")
+    rpt.paragraph(f"**Effective trim methods this run:** `{', '.join(trim_cfg['effective_methods'])}`")
+    if trim_cfg["non_selected_methods"]:
+        rpt.paragraph(
+            "**Intentionally not run:** "
+            f"`{', '.join(trim_cfg['non_selected_methods'])}` "
+            "(trim comparison disabled or excluded)."
+        )
+
+    cutadapt_cfg = cfg.get("trimming", {}).get("cutadapt", {})
+    adapter_fwd = str(cutadapt_cfg.get("adapter_fwd", "")).strip()
+    adapter_rev = str(cutadapt_cfg.get("adapter_rev", "")).strip()
+    quality = int(cutadapt_cfg.get("quality", 20))
+    min_length = int(cutadapt_cfg.get("min_length", 25))
+    has_adapter = bool(adapter_fwd or adapter_rev)
+    quality_active = quality > 0 or min_length > 0
+    if has_adapter and quality_active:
+        cutadapt_mode = "adapter+quality"
+    elif has_adapter:
+        cutadapt_mode = "adapter-only"
+    else:
+        cutadapt_mode = "quality-only"
+    rpt.paragraph(f"**Cutadapt mode:** `{cutadapt_mode}`")
+
+    rpt.paragraph(f"Methods run: {', '.join(methods)}")
     if methods == ["none"]:
         rpt.paragraph(
             "Only the `none` baseline was run: reads were passed through "

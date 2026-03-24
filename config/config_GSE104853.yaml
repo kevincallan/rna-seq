@@ -97,6 +97,10 @@ star_params:
 
 # -- Trimming methods ---------------------------------------------------------
 trimming:
+  primary_method: "cutadapt"
+  compare_methods: false
+  comparison_methods: []
+
   none:
     enabled: true
 

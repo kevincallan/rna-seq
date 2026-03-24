@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.metadata import read_samples_tsv
 from src.utils import (
     ensure_dirs,
-    get_enabled_methods,
+    get_effective_trim_methods,
     get_run_id,
     load_config,
     resolve_results_dir,
@@ -140,7 +140,7 @@ def main() -> None:
         sys.exit(f"samples.tsv not found at {samples_tsv}. Run steps 0-1 first.")
     samples = read_samples_tsv(samples_tsv)
 
-    methods = args.methods or get_enabled_methods(cfg)[:1]
+    methods = args.methods or get_effective_trim_methods(cfg)[:1]
     mapping_units = build_mapping_units_with_bams(
         results_dir, samples, methods, require_ready=True
     )

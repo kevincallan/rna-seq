@@ -21,7 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.utils import (
     check_tool,
     ensure_dirs,
-    get_enabled_methods,
+    get_effective_trim_methods,
+    get_trim_config_summary,
     get_run_id,
     get_tool_version,
     hash_config,
@@ -103,7 +104,7 @@ def validate_tools(cfg: Dict[str, Any]) -> Dict[str, str]:
         Mapping of tool name -> version string.  Tools not found raise errors.
     """
     tools_cfg = cfg.get("tools", {})
-    methods = get_enabled_methods(cfg)
+    methods = get_effective_trim_methods(cfg)
     versions: Dict[str, str] = {}
 
     # Always-required compiled tools -- mapper(s)
@@ -212,7 +213,8 @@ def write_run_manifest(
         "config_path": cfg.get("_config_path", ""),
         "python_version": sys.version,
         "tool_versions": tool_versions,
-        "enabled_trim_methods": get_enabled_methods(cfg),
+        "effective_trim_methods": get_effective_trim_methods(cfg),
+        "trim_config": get_trim_config_summary(cfg),
     }
 
     manifest_path = results_dir / "run_manifest.json"
@@ -285,7 +287,14 @@ def main(cfg: Dict[str, Any], run_id: str) -> Dict[str, Any]:
         logs_dir,
     )
 
-    for method in get_enabled_methods(cfg):
+    trim_info = get_trim_config_summary(cfg)
+    logger.info(
+        "Trim config: primary=%s compare_methods=%s effective=%s",
+        trim_info["primary_method"],
+        trim_info["compare_methods"],
+        ",".join(trim_info["effective_methods"]),
+    )
+    for method in trim_info["effective_methods"]:
         ensure_dirs(
             work_dir / "trimmed" / method,
             results_dir / method / "mapping",

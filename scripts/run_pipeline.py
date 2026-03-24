@@ -46,7 +46,6 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.utils import (
-    get_enabled_methods,
     get_run_id,
     load_config,
     resolve_cache_dir,

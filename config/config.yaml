@@ -132,17 +132,22 @@ star_params:
 
 # -- Trimming methods ---------------------------------------------------------
 # Step 02:
-# - Enable >=2 methods (for example: none + cutadapt) to compare preprocessing.
-# - "none" is a valid no-trim baseline control.
+# - Primary exam-day path uses one trim method (primary_method) by default.
+# - Enable compare_methods=true to add comparison_methods (for example "none").
 trimming:
+  primary_method: "cutadapt"
+  compare_methods: false
+  comparison_methods: []
+
   none:
     enabled: true
     # No parameters needed
 
   cutadapt:
-    enabled: false
-    adapter_fwd: "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"  # Illumina TruSeq R1
-    adapter_rev: "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"  # Illumina TruSeq R2
+    enabled: true
+    # Optional dataset-specific adapters; leave blank for quality/min-length trimming only.
+    adapter_fwd: ""
+    adapter_rev: ""
     quality: 20     # increase for stricter base quality trimming
     min_length: 25  # increase to discard shorter post-trim reads
     extra_args: ""

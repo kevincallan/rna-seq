@@ -67,6 +67,10 @@ star_params:
   extra_args: ""
 
 trimming:
+  primary_method: "cutadapt"
+  compare_methods: false
+  comparison_methods: []
+
   none:
     enabled: false
   cutadapt:

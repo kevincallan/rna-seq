@@ -16,7 +16,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Union
 
 import yaml
 
@@ -342,13 +342,111 @@ def load_config(path: Union[str, Path]) -> Dict[str, Any]:
 def get_enabled_methods(cfg: Dict[str, Any]) -> List[str]:
     """Return list of trimming method names that are enabled in config."""
     methods = []
+    control_keys = {"primary_method", "compare_methods", "comparison_methods"}
     for name, params in cfg.get("trimming", {}).items():
+        if name in control_keys:
+            continue
         if isinstance(params, dict) and params.get("enabled", True):
             methods.append(name)
         elif params is None:
             # 'none' method may have no params dict
             methods.append(name)
     return sorted(methods)
+
+
+def _configured_trim_methods(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    trimming = cfg.get("trimming", {})
+    control_keys = {"primary_method", "compare_methods", "comparison_methods"}
+    out: Dict[str, Dict[str, Any]] = {}
+    for name, params in trimming.items():
+        if name in control_keys:
+            continue
+        if params is None:
+            out[name] = {}
+        elif isinstance(params, dict):
+            out[name] = dict(params)
+    return out
+
+
+def _dedupe_preserve_order(items: List[str]) -> List[str]:
+    seen: Set[str] = set()
+    out: List[str] = []
+    for x in items:
+        if x not in seen:
+            out.append(x)
+            seen.add(x)
+    return out
+
+
+def get_trim_config_summary(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and summarize trim-method config for the current run."""
+    trimming = cfg.get("trimming", {})
+    configured = _configured_trim_methods(cfg)
+
+    primary = str(trimming.get("primary_method", "")).strip()
+    if not primary:
+        raise ValueError(
+            "Invalid trimming config: trimming.primary_method must be set."
+        )
+    if primary not in configured:
+        raise ValueError(
+            f"Invalid trimming config: primary_method '{primary}' is not configured under trimming."
+        )
+
+    compare = bool(trimming.get("compare_methods", False))
+    raw_cmp = trimming.get("comparison_methods", [])
+    if raw_cmp is None:
+        raw_cmp = []
+    if not isinstance(raw_cmp, list):
+        raise ValueError(
+            "Invalid trimming config: trimming.comparison_methods must be a list."
+        )
+    cmp_methods = [str(m).strip() for m in raw_cmp if str(m).strip()]
+    for m in cmp_methods:
+        if m not in configured:
+            raise ValueError(
+                f"Invalid trimming config: comparison method '{m}' is not configured under trimming."
+            )
+
+    effective = [primary]
+    if compare:
+        effective.extend(cmp_methods)
+    effective = _dedupe_preserve_order(effective)
+    if not effective:
+        raise ValueError(
+            "Invalid trimming config: effective trim method list is empty."
+        )
+
+    non_selected = [m for m in configured.keys() if m not in effective]
+    return {
+        "primary_method": primary,
+        "compare_methods": compare,
+        "comparison_methods": cmp_methods,
+        "effective_methods": effective,
+        "configured_methods": list(configured.keys()),
+        "non_selected_methods": non_selected,
+    }
+
+
+def get_effective_trim_methods(
+    cfg: Dict[str, Any],
+    methods_override: Optional[List[str]] = None,
+) -> List[str]:
+    """Return effective trim methods honoring config model and CLI override."""
+    configured = _configured_trim_methods(cfg)
+    if methods_override:
+        cleaned = [str(m).strip() for m in methods_override if str(m).strip()]
+        cleaned = _dedupe_preserve_order(cleaned)
+        unknown = [m for m in cleaned if m not in configured]
+        if unknown:
+            raise ValueError(
+                "Invalid --methods override: unknown/unconfigured method(s): "
+                + ", ".join(unknown)
+            )
+        if not cleaned:
+            raise ValueError("Invalid --methods override: no methods provided.")
+        return cleaned
+    return get_trim_config_summary(cfg)["effective_methods"]
 
 
 def get_run_id(cfg: Dict[str, Any]) -> str:

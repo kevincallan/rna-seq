@@ -97,13 +97,18 @@ star_params:
 
 # -- Trimming methods ---------------------------------------------------------
 trimming:
+  primary_method: "cutadapt"
+  compare_methods: false
+  comparison_methods: []
+
   none:
     enabled: true
 
   cutadapt:
-    enabled: false
-    adapter_fwd: "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"
-    adapter_rev: "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"
+    enabled: true
+    # Dataset-specific optional adapters. Leave blank for quality/min-length trimming only.
+    adapter_fwd: ""
+    adapter_rev: ""
     quality: 20
     min_length: 25
     extra_args: ""
