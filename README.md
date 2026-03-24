@@ -86,11 +86,11 @@ All steps are automated and config-driven. The pipeline compares multiple trimmi
 | 2 | `02_trim_reads` | Run each enabled trimming method | Trimmed FASTQs, `trimming_summary.tsv` |
 | 3 | `03_qc_fastqc` | FastQC on raw and trimmed reads | FastQC HTML reports |
 | 4 | `04_multiqc` | Aggregate FastQC into MultiQC | MultiQC HTML reports |
-| 5 | `05_map_star` | Align reads with STAR, index BAMs | Sorted BAMs, `mapping_summary.tsv` |
+| 5 | `05_map_star` | Align reads (STAR/HISAT2), validate BAM integrity, then index BAMs | Sorted/indexed BAMs, `mapping_summary.tsv` |
 | 6 | `07_featurecounts` | Count reads per gene (all option sets) | Count matrices, `featurecounts_summary.tsv` |
 | 7 | `08_filter_matrix` | Remove lowly-expressed genes | Filtered matrices, `filtering_summary.tsv` |
 | 8 | `09_deseq2` | DE analysis for every count option set | DE tables, PCA/MA/volcano plots, gene lists |
-| 9 | `10_compare_methods` | Compare methods, select primary branch | `method_comparison.md`, `selected_analysis.tsv` |
+| 9 | `10_compare_methods` | Compare methods, select count-comparison + visualisation branches | `method_comparison.md`, `selected_count_comparison.tsv`, `selected_visualisation.tsv`, `selected_analysis.tsv` (legacy) |
 | 10 | `06_bigwig` | Generate coverage tracks (CPM + DESeq2-scaled) | BigWig files for IGV |
 | 11 | `11_make_report` | Generate combined report with health checks | `report.md`, `report.html` |
 
@@ -109,7 +109,12 @@ The pipeline treats the featureCounts option set as a first-class analysis dimen
 - **DE output paths** include the count option: `<trim>/deseq2/<mapper>/<mapper_opt>/<count_opt>/<contrast>/`
 - **The report** shows results for every analysis unit with clear labelling
 
-After comparison, the pipeline selects one **primary analysis branch** (written to `selected_analysis.tsv`) based on assigned-read percentage and valid DE outputs.
+After comparison, the pipeline writes two explicit selected branches:
+
+- `selected_count_comparison.tsv` -- used for featureCounts/DE interpretation
+- `selected_visualisation.tsv` -- used for selected-only BigWig generation
+
+For backward compatibility, `selected_analysis.tsv` is still written and mirrors the count-comparison selection.
 
 ---
 
@@ -210,16 +215,22 @@ featurecounts:
       fraction: true
 ```
 
-### Selected analysis branch
+### Selected analysis branches
 
-The pipeline auto-selects a primary branch after comparing option sets. Override manually:
+The pipeline auto-selects separate branches for interpretation and visualisation. Optional manual overrides:
 
 ```yaml
-selected_branch:
-  trim_method: "cutadapt"
+selected_count_comparison:
+  trim_method: "none"
   mapper: "star"
   mapper_option_set: "default"
   count_option_set: "strict"
+
+selected_visualisation:
+  trim_method: "none"
+  mapper: "star"
+  mapper_option_set: "strict_unique"
+  count_option_set: "default"
 ```
 
 ### BigWig
@@ -257,8 +268,11 @@ results/<run_id>/
   mapping_summary.tsv                        # Mapping rates
   featurecounts_summary.tsv                  # Assigned reads + Assigned_pct
   filtering_summary.tsv                      # Genes filtered per option set
-  de_summary.tsv                             # DEG counts (all option sets)
-  selected_analysis.tsv                      # Auto-selected primary branch
+  redundancy_summary.tsv                     # Duplicate clean-matrix relationships
+  de_summary.tsv                             # DEG summary + status per branch/contrast
+  selected_count_comparison.tsv              # Selected interpretation branch
+  selected_visualisation.tsv                 # Selected BigWig branch
+  selected_analysis.tsv                      # Legacy compatibility selection file
   reports/
     report.md / report.html                  # Combined report with health checks
     method_comparison.md                     # Full comparison report
@@ -281,6 +295,16 @@ results/<run_id>/
 
 ---
 
+## Reliability Model
+
+- **Run-scoped work paths:** intermediates are isolated under `work/<run_id>/...` (for example `fastq_links`, `trimmed`) to prevent cross-run interference.
+- **Shared reusable cache:** reference-derived filtered GTF files are cached under `cache/filtered_gtf/` and reused across runs.
+- **Concurrent-safe cache build:** filtered GTF generation uses lock + atomic rename so two runs do not corrupt shared cache entries.
+- **BAM safety checks:** mapping validates BAM integrity before indexing, and indexing failures are wrapped with actionable context (run/sample/branch/path).
+- **Downstream BAM guards:** BAM-consuming steps fail early when BAMs are missing/unindexed rather than producing ambiguous later errors.
+
+---
+
 ## Interpreting the Results
 
 ### DE results (`de_all.tsv`)
@@ -295,12 +319,17 @@ results/<run_id>/
 
 The report includes a **Pipeline Health** section showing:
 - Whether each expected output file exists
-- For each analysis unit + contrast: whether DE completed, and how many DEGs
-- Clear distinction between "file missing" vs "zero significant genes" vs "DE completed with results"
+- Branch-level consistency between counting/filtering and DE summaries
+- Clear distinction between `MISSING`, `REDUNDANT_SKIPPED`, `COMPLETED_ZERO_DEG`, `MALFORMED`, and passing rows
 
-### Selected branch
+### Selected branches
 
-The report highlights the **selected primary branch** -- the analysis unit with the highest assigned-read percentage among those with valid DE outputs (excluding multimapper-aware option sets). This branch is used for BigWig generation and is emphasised in the report.
+The report highlights both selected roles:
+
+- **Count-comparison branch** for featureCounts/DE interpretation
+- **Visualisation branch** for selected-only BigWig generation
+
+The legacy `selected_analysis.tsv` is retained for compatibility and mirrors the count-comparison selection.
 
 ---
 
@@ -352,6 +381,7 @@ tests/
   test_analysis_unit.py          # Path resolution, analysis unit tests
   test_path_integrity.py         # Cross-step path chain tests
   test_profiles.py               # Execution profile and step-order tests
+  test_reliability_paths.py      # Run isolation/cache/BAM reliability tests
 ```
 
 ---
@@ -378,4 +408,5 @@ pip install -r env/requirements.txt
 - **`FATAL: Missing packages`**: Check your Python environment. Use `./py -m pip list`.
 - **`FATAL: path(s) not found`**: Check `--dataset` and `--species` arguments.
 - **featureCounts paired-end error**: Verify `data.layout` in config matches actual library type.
+- **BAM integrity/indexing failure**: check storage/I/O health, remove the failed run directory, and rerun the same command. Mapping now fails early with run/sample/branch context.
 - **BigWig step fails**: BigWig now runs after DE. Use `--profile primary_bw` or `--profile full`.
