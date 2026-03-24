@@ -17,11 +17,15 @@ from src.analysis_unit import (
     build_mapping_units,
     infer_analysis_units_from_de_summary,
     read_selected_analysis,
+    read_selected_count_comparison,
+    read_selected_visualisation,
     resolve_count_matrix,
     resolve_de_dir,
     resolve_fc_dir,
     unit_label,
     write_selected_analysis,
+    write_selected_count_comparison,
+    write_selected_visualisation,
 )
 
 
@@ -158,6 +162,14 @@ class TestSelectedAnalysis:
     def test_read_missing(self, tmp_path):
         result = read_selected_analysis(tmp_path)
         assert result is None
+
+    def test_role_specific_selected_files(self, tmp_path):
+        count = AnalysisUnit("none", "star", "default", "strict")
+        vis = AnalysisUnit("none", "star", "strict_unique", "default")
+        write_selected_count_comparison(tmp_path, count, "auto")
+        write_selected_visualisation(tmp_path, vis, "auto")
+        assert read_selected_count_comparison(tmp_path) == count
+        assert read_selected_visualisation(tmp_path) == vis
 
 
 class TestUnitLabel:

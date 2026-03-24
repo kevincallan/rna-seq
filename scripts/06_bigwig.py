@@ -31,7 +31,11 @@ from src.utils import (
 logger = logging.getLogger(__name__)
 
 
-from src.analysis_unit import build_mapping_units_with_bams, read_selected_analysis
+from src.analysis_unit import (
+    build_mapping_units_with_bams,
+    read_selected_analysis,
+    read_selected_visualisation,
+)
 
 
 def make_bigwig(
@@ -137,10 +141,13 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     mapping_units = build_mapping_units_with_bams(results_dir, samples, methods,
                                                   prefer_filtered=True)
 
-    selected = read_selected_analysis(results_dir) if mode == "selected_only" else None
+    selected = read_selected_visualisation(results_dir) if mode == "selected_only" else None
+    if mode == "selected_only" and selected is None:
+        # Backward compatibility for runs that only produced selected_analysis.tsv.
+        selected = read_selected_analysis(results_dir)
     if mode == "selected_only" and selected is None:
         logger.warning(
-            "BigWig mode is 'selected_only' but no selected_analysis.tsv found. "
+            "BigWig mode is 'selected_only' but no selected_visualisation.tsv/selected_analysis.tsv found. "
             "Falling back to all_units mode."
         )
         mode = "all_units"

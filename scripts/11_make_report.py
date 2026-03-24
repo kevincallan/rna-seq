@@ -31,6 +31,8 @@ from src.analysis_unit import (
     AnalysisUnit,
     infer_analysis_units_from_de_summary,
     read_selected_analysis,
+    read_selected_count_comparison,
+    read_selected_visualisation,
     resolve_de_dir,
     resolve_de_base_legacy,
 )
@@ -88,6 +90,26 @@ def _resolve_de_all_for_unit(results_dir: Path, au: AnalysisUnit, contrast: str)
     return de_path  # return expected (new) path even if missing
 
 
+def _branch4_from_row(row: Dict[str, str], count_key: str = "count_option_set") -> tuple[str, str, str, str]:
+    return (
+        row.get("trim_method", row.get("method", "")),
+        row.get("mapper", "star"),
+        row.get("mapper_option_set", "default"),
+        row.get(count_key, "default"),
+    )
+
+
+def _read_tsv(path: Path) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    if not path.exists():
+        return rows
+    with open(path, encoding="utf-8") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        for row in reader:
+            rows.append(dict(row))
+    return rows
+
+
 def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None:
     """Execute step 11."""
     logger.info("=" * 60)
@@ -100,7 +122,10 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     comparisons = cfg.get("comparisons", [])
     project_name = cfg["project"]["name"]
 
-    selected = read_selected_analysis(results_dir)
+    selected_count = read_selected_count_comparison(results_dir)
+    selected_vis = read_selected_visualisation(results_dir)
+    selected_legacy = read_selected_analysis(results_dir)
+    selected = selected_count or selected_legacy
 
     rpt = MarkdownReport(f"RNA-seq Analysis Report: {project_name}")
 
@@ -159,6 +184,15 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     fc_summary = results_dir / "featurecounts_summary.tsv"
     if fc_summary.exists():
         rpt.table_from_tsv(fc_summary)
+        with open(fc_summary, encoding="utf-8") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            modes = sorted({row.get("counting_mode", "").strip() for row in reader if row.get("counting_mode", "").strip()})
+        if modes:
+            rpt.paragraph(f"**Counting mode:** {', '.join(modes)}")
+        else:
+            layout = str(cfg.get("data", {}).get("layout", "paired")).lower()
+            inferred_mode = "read_pairs" if layout == "paired" else "reads"
+            rpt.paragraph(f"**Counting mode (inferred from layout):** {inferred_mode}")
     else:
         rpt.paragraph("*(featureCounts summary not available)*")
 
@@ -170,19 +204,32 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     else:
         rpt.paragraph("*(Filtering summary not available)*")
 
-    # === Selected analysis branch ===========================================
-    if selected:
-        rpt.h2("Selected Primary Analysis Branch")
-        rpt.paragraph(
-            f"**Selected branch:** `{selected.label}`"
-        )
-        sel_tsv = results_dir / "selected_analysis.tsv"
-        if sel_tsv.exists():
-            rpt.table_from_tsv(sel_tsv)
-        rpt.paragraph(
-            "This branch is emphasised below. All other branches are also "
-            "shown for comparison."
-        )
+    # === Selected analysis branches =========================================
+    if selected_count or selected_vis or selected_legacy:
+        rpt.h2("Selected Analysis Branches")
+        if selected_count:
+            rpt.paragraph(f"**Count-comparison branch:** `{selected_count.label}`")
+            cc_tsv = results_dir / "selected_count_comparison.tsv"
+            if cc_tsv.exists():
+                rpt.table_from_tsv(cc_tsv)
+        elif selected_legacy:
+            rpt.paragraph(
+                f"**Count-comparison branch (legacy fallback):** `{selected_legacy.label}`"
+            )
+
+        if selected_vis:
+            rpt.paragraph(f"**Visualisation branch (BigWig/IGV):** `{selected_vis.label}`")
+            vis_tsv = results_dir / "selected_visualisation.tsv"
+            if vis_tsv.exists():
+                rpt.table_from_tsv(vis_tsv)
+        else:
+            rpt.paragraph("*(selected_visualisation.tsv not found)*")
+
+        if selected_legacy:
+            sel_tsv = results_dir / "selected_analysis.tsv"
+            if sel_tsv.exists():
+                rpt.paragraph("Legacy selected branch compatibility file:")
+                rpt.table_from_tsv(sel_tsv)
 
     # === DE results per analysis unit / contrast ============================
     rpt.h2("Differential Expression Results")
@@ -194,8 +241,12 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         rpt.paragraph("*(DE summary not available)*")
 
     for au in analysis_units:
-        is_selected = selected is not None and au == selected
-        marker = " [SELECTED]" if is_selected else ""
+        markers: List[str] = []
+        if selected_count is not None and au == selected_count:
+            markers.append("COUNT_COMPARISON")
+        if selected_vis is not None and au == selected_vis:
+            markers.append("VISUALISATION")
+        marker = f" [{' & '.join(markers)}]" if markers else ""
         rpt.h3(f"Analysis Unit: {au.label}{marker}")
 
         for contrast in comparisons:
@@ -276,10 +327,107 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         ("featurecounts_summary.tsv", results_dir / "featurecounts_summary.tsv"),
         ("filtering_summary.tsv", results_dir / "filtering_summary.tsv"),
         ("de_summary.tsv", results_dir / "de_summary.tsv"),
+        ("redundancy_summary.tsv", results_dir / "redundancy_summary.tsv"),
+        ("selected_count_comparison.tsv", results_dir / "selected_count_comparison.tsv"),
+        ("selected_visualisation.tsv", results_dir / "selected_visualisation.tsv"),
         ("selected_analysis.tsv", results_dir / "selected_analysis.tsv"),
     ]:
         status = "PASS" if path.exists() else "MISSING"
         health_checks.append({"check": name, "status": status, "path": str(path)})
+
+    fc_rows = _read_tsv(results_dir / "featurecounts_summary.tsv")
+    filt_rows = _read_tsv(results_dir / "filtering_summary.tsv")
+    de_rows = _read_tsv(results_dir / "de_summary.tsv")
+    branch4_fc = {
+        (
+            r.get("trim_method", r.get("method", "")),
+            r.get("mapper", "star"),
+            r.get("mapper_option_set", "default"),
+            r.get("option_set", "default"),
+        )
+        for r in fc_rows
+    }
+    branch4_filt = {
+        (
+            r.get("trim_method", r.get("method", "")),
+            r.get("mapper", "star"),
+            r.get("mapper_option_set", "default"),
+            r.get("option_set", "default"),
+        )
+        for r in filt_rows
+    }
+    branch4_de_status: Dict[tuple[str, str, str, str], List[str]] = {}
+    for row in de_rows:
+        key = _branch4_from_row(row)
+        branch4_de_status.setdefault(key, []).append(str(row.get("status", "completed")))
+
+    for key in sorted(branch4_fc | branch4_filt):
+        statuses = branch4_de_status.get(key, [])
+        key_label = "/".join(key)
+        if not statuses:
+            health_checks.append({
+                "check": f"Branch summary sync: {key_label}",
+                "status": "MISSING",
+                "path": "de_summary.tsv",
+            })
+            continue
+        unique = {s.lower() for s in statuses}
+        if "malformed" in unique:
+            status = "MALFORMED"
+        elif unique <= {"redundant_skipped"}:
+            status = "REDUNDANT_SKIPPED"
+        elif unique <= {"completed"}:
+            sig_sum = 0
+            for row in de_rows:
+                if _branch4_from_row(row) != key:
+                    continue
+                try:
+                    sig_sum += int(float(row.get("sig_total", "0") or 0))
+                except ValueError:
+                    pass
+            status = "COMPLETED_ZERO_DEG" if sig_sum == 0 else "PASS"
+        elif "completed" in unique:
+            status = "PASS"
+        elif "de_failed" in unique or "missing_output" in unique:
+            status = "MISSING"
+        else:
+            status = "MALFORMED"
+        health_checks.append({
+            "check": f"Branch summary sync: {key_label}",
+            "status": status,
+            "path": "de_summary.tsv",
+        })
+
+    selected_refs = [
+        ("selected_count_comparison", selected_count),
+        ("selected_visualisation", selected_vis),
+        ("selected_analysis_legacy", selected_legacy),
+    ]
+    real_branches = set(branch4_de_status.keys())
+    for label, selected_unit in selected_refs:
+        if selected_unit is None:
+            continue
+        key = (
+            selected_unit.method,
+            selected_unit.mapper,
+            selected_unit.mapper_option_set,
+            selected_unit.count_option_set,
+        )
+        health_checks.append({
+            "check": f"{label} exists in de_summary",
+            "status": "PASS" if key in real_branches else "MISSING",
+            "path": "de_summary.tsv",
+        })
+
+    bw_cfg = cfg.get("bigwig", {})
+    if bw_cfg.get("enabled", False) and bw_cfg.get("mode", "all_units") == "selected_only" and selected_vis:
+        bw_dir = results_dir / selected_vis.method / "bigwig" / selected_vis.mapper / selected_vis.mapper_option_set
+        has_bw = bw_dir.exists() and any(bw_dir.glob("*.bw"))
+        health_checks.append({
+            "check": "Selected visualisation BigWigs present",
+            "status": "PASS" if has_bw else "MISSING",
+            "path": str(bw_dir),
+        })
 
     for au in analysis_units:
         for contrast in comparisons:

@@ -139,7 +139,7 @@ trimming:
     # No parameters needed
 
   cutadapt:
-    enabled: true
+    enabled: false
     adapter_fwd: "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"  # Illumina TruSeq R1
     adapter_rev: "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"  # Illumina TruSeq R2
     quality: 20     # increase for stricter base quality trimming
@@ -249,14 +249,22 @@ comparisons:
     denominator: "wt"
 
 # -- BigWig parameters --------------------------------------------------------
-# -- Selected analysis branch (optional) ------------------------------------
-# If set, this branch is emphasised in the report and used for BigWig.
-# If omitted, the pipeline auto-selects after comparing count option sets.
-# selected_branch:
-#   trim_method: "cutadapt"
+# -- Selected branches (optional overrides) ---------------------------------
+# If omitted, step 10 writes:
+#   - selected_count_comparison.tsv (lecture count-option comparison branch)
+#   - selected_visualisation.tsv   (BigWig/IGV branch)
+#
+# selected_count_comparison:
+#   trim_method: "none"
 #   mapper: "star"
 #   mapper_option_set: "default"
 #   count_option_set: "strict"
+#
+# selected_visualisation:
+#   trim_method: "none"
+#   mapper: "star"
+#   mapper_option_set: "strict_unique"
+#   count_option_set: "default"
 
 bigwig:
   # BigWig generation (now runs after DESeq2 so size factors are available).

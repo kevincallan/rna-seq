@@ -100,7 +100,7 @@ trimming:
     enabled: true
 
   cutadapt:
-    enabled: true
+    enabled: false
     adapter_fwd: "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"
     adapter_rev: "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"
     quality: 20
@@ -186,14 +186,22 @@ comparisons:
     denominator: "CondA"
 
 # -- BigWig parameters --------------------------------------------------------
-# -- Selected analysis branch (optional) ------------------------------------
-# If set, this branch is emphasised in the report and used for BigWig.
-# If omitted, the pipeline auto-selects after comparing count option sets.
-# selected_branch:
-#   trim_method: "cutadapt"
+# -- Selected branches (optional overrides) ---------------------------------
+# If omitted, step 10 writes:
+#   - selected_count_comparison.tsv (lecture count-option comparison branch)
+#   - selected_visualisation.tsv   (BigWig/IGV branch)
+#
+# selected_count_comparison:
+#   trim_method: "none"
 #   mapper: "star"
 #   mapper_option_set: "default"
 #   count_option_set: "strict"
+#
+# selected_visualisation:
+#   trim_method: "none"
+#   mapper: "star"
+#   mapper_option_set: "strict_unique"
+#   count_option_set: "default"
 
 bigwig:
   enabled: false

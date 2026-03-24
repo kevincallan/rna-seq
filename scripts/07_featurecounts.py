@@ -67,6 +67,9 @@ def run_featurecounts(
 
     if paired_end:
         cmd.extend(["-p", "--countReadPairs"])
+        logger.info("  featureCounts mode: paired-end fragments (--countReadPairs)")
+    else:
+        logger.info("  featureCounts mode: single reads")
 
     if option_set.get("B", False):
         cmd.append("-B")
@@ -355,7 +358,16 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
             logger.error("No BAM files for method '%s', skipping", method)
             continue
 
-        paired_end = any(getattr(s, "layout", "paired") == "paired" for s in samples)
+        sample_layouts = {str(getattr(s, "layout", "paired")).lower() for s in samples}
+        paired_end = "paired" in sample_layouts
+        if len(sample_layouts) > 1:
+            logger.warning(
+                "Mixed sample layouts detected (%s). Counting in paired-end mode=%s.",
+                ", ".join(sorted(sample_layouts)),
+                paired_end,
+            )
+        counting_mode = "read_pairs" if paired_end else "reads"
+        logger.info("Counting mode for this branch: %s", counting_mode)
 
         for opt_name, opt_params in option_sets.items():
             logger.info("  Option set: %s", opt_name)
@@ -405,6 +417,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                         "mapper": mapper,
                         "mapper_option_set": mapper_opt,
                         "option_set": opt_name,
+                        "counting_mode": counting_mode,
                         "sample": clean_sname,
                     }
                     for status, sname_vals in summary.items():
@@ -447,7 +460,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     if all_summary_rows:
         key_cols = [
             "trim_method", "mapper", "mapper_option_set",
-            "option_set", "sample",
+            "option_set", "counting_mode", "sample",
         ]
         stat_cols = sorted(
             {k for row in all_summary_rows for k in row

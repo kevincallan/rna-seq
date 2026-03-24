@@ -9,10 +9,11 @@ samples -- rule of thumb ~2 reads per sample).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -31,6 +32,18 @@ logger = logging.getLogger(__name__)
 
 
 from src.analysis_unit import build_mapping_units
+
+
+def _matrix_fingerprint(path: Path) -> str:
+    """Stable sha256 fingerprint for a filtered matrix file."""
+    hasher = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 def filter_matrix(
@@ -114,6 +127,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
 
     option_sets = cfg["featurecounts"].get("option_sets", {"default": {}})
     all_stats: List[Dict[str, Any]] = []
+    filtered_matrices: List[Dict[str, Any]] = []
 
     mapping_units = build_mapping_units(results_dir, methods)
     for unit in mapping_units:
@@ -135,6 +149,14 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
             stats["mapper_option_set"] = mapper_opt
             stats["option_set"] = opt_name
             all_stats.append(stats)
+            filtered_matrices.append({
+                "trim_method": method,
+                "mapper": mapper,
+                "mapper_option_set": mapper_opt,
+                "count_option_set": opt_name,
+                "matrix_path": str(output_matrix),
+                "fingerprint": _matrix_fingerprint(output_matrix),
+            })
 
     # Write filtering summary
     summary_path = results_dir / "filtering_summary.tsv"
@@ -151,6 +173,49 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                     f"{s['genes_in']}\t{s['genes_out']}\t{s['genes_removed']}\n"
                 )
         logger.info("Filtering summary -> %s", summary_path)
+
+    # Write redundancy summary from clean-matrix fingerprints
+    redundancy_path = results_dir / "redundancy_summary.tsv"
+    canonical_by_fp: Dict[str, Tuple[str, str, str, str]] = {}
+    for row in filtered_matrices:
+        key = (
+            row["trim_method"],
+            row["mapper"],
+            row["mapper_option_set"],
+            row["count_option_set"],
+        )
+        fp = row["fingerprint"]
+        if fp not in canonical_by_fp or key < canonical_by_fp[fp]:
+            canonical_by_fp[fp] = key
+
+    with open(redundancy_path, "w", encoding="utf-8") as fh:
+        fh.write(
+            "trim_method\tmapper\tmapper_option_set\tcount_option_set\t"
+            "fingerprint\tis_redundant\tcanonical_trim_method\tcanonical_mapper\t"
+            "canonical_mapper_option_set\tcanonical_count_option_set\tredundancy_reason\n"
+        )
+        for row in sorted(
+            filtered_matrices,
+            key=lambda r: (
+                r["trim_method"], r["mapper"], r["mapper_option_set"], r["count_option_set"]
+            ),
+        ):
+            key = (
+                row["trim_method"],
+                row["mapper"],
+                row["mapper_option_set"],
+                row["count_option_set"],
+            )
+            canonical = canonical_by_fp[row["fingerprint"]]
+            is_redundant = key != canonical
+            reason = "identical_clean_matrix" if is_redundant else "canonical"
+            fh.write(
+                f"{row['trim_method']}\t{row['mapper']}\t{row['mapper_option_set']}\t"
+                f"{row['count_option_set']}\t{row['fingerprint']}\t"
+                f"{'true' if is_redundant else 'false'}\t"
+                f"{canonical[0]}\t{canonical[1]}\t{canonical[2]}\t{canonical[3]}\t{reason}\n"
+            )
+    logger.info("Redundancy summary -> %s", redundancy_path)
 
     logger.info("STEP 08 complete.\n")
 

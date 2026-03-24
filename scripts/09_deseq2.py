@@ -14,7 +14,7 @@ import csv
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -445,6 +445,44 @@ from src.analysis_unit import build_mapping_units, resolve_count_matrix, resolve
 # Main
 # =========================================================================
 
+
+def _empty_de_stats() -> Dict[str, int]:
+    return {"total_tested": 0, "sig_up": 0, "sig_down": 0, "sig_total": 0}
+
+
+def _read_redundancy_summary(
+    results_dir: Path,
+) -> Dict[Tuple[str, str, str, str], Dict[str, str]]:
+    """Load redundant-branch mapping from redundancy_summary.tsv if present."""
+    path = results_dir / "redundancy_summary.tsv"
+    out: Dict[Tuple[str, str, str, str], Dict[str, str]] = {}
+    if not path.exists():
+        return out
+
+    with open(path, encoding="utf-8") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        for row in reader:
+            is_redundant = str(row.get("is_redundant", "")).strip().lower()
+            if is_redundant not in {"1", "true", "yes"}:
+                continue
+            key = (
+                row.get("trim_method", ""),
+                row.get("mapper", "star"),
+                row.get("mapper_option_set", "default"),
+                row.get("count_option_set", "default"),
+            )
+            out[key] = {
+                "canonical_trim_method": row.get("canonical_trim_method", ""),
+                "canonical_mapper": row.get("canonical_mapper", ""),
+                "canonical_mapper_option_set": row.get("canonical_mapper_option_set", ""),
+                "canonical_count_option_set": row.get("canonical_count_option_set", ""),
+                "fingerprint": row.get("fingerprint", ""),
+                "redundancy_reason": row.get("redundancy_reason", "identical_clean_matrix"),
+            }
+    if out:
+        logger.info("Loaded %d redundant branch mappings from %s", len(out), path)
+    return out
+
 def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None:
     """Execute step 09."""
     logger.info("=" * 60)
@@ -456,6 +494,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     method_backend = deseq_cfg.get("method", "pydeseq2")
     fdr = deseq_cfg.get("fdr_threshold", 0.05)
     comparisons = cfg.get("comparisons", [])
+    strict_mode = bool(cfg.get("_strict", False) or deseq_cfg.get("require_complete_summary", False))
 
     logger.info("Backend: %s", method_backend)
 
@@ -463,8 +502,13 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     samples = read_samples_tsv(samples_tsv)
     methods = methods_override or get_enabled_methods(cfg)
     option_sets = cfg["featurecounts"].get("option_sets", {"default": {}})
+    contrast_names = ["auto"] if method_backend == "wrapper" else [c["name"] for c in comparisons]
+    if not contrast_names:
+        raise ValueError("No DE contrasts configured. Please set config.comparisons.")
 
-    all_de_stats: List[Dict[str, Any]] = []
+    redundant_map = _read_redundancy_summary(results_dir)
+    all_de_stats: Dict[Tuple[str, str, str, str, str], Dict[str, Any]] = {}
+    integrity_issues: List[str] = []
 
     mapping_units = build_mapping_units(results_dir, methods)
     for unit in mapping_units:
@@ -473,12 +517,39 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         mapper_opt = unit["mapper_option_set"]
 
         for opt_name in option_sets:
+            branch_key_4 = (method, mapper, mapper_opt, opt_name)
+            redundancy = redundant_map.get(branch_key_4)
             logger.info(
                 "--- DE for trim=%s mapper=%s mapper_option=%s count_option=%s ---",
                 method, mapper, mapper_opt, opt_name,
             )
             de_dir = resolve_de_dir(results_dir, method, mapper, mapper_opt, opt_name)
             ensure_dirs(de_dir)
+
+            if redundancy is not None:
+                logger.info(
+                    "Skipping redundant DE branch %s/%s/%s/%s",
+                    method, mapper, mapper_opt, opt_name,
+                )
+                for cname in contrast_names:
+                    key = (method, mapper, mapper_opt, opt_name, cname)
+                    row = {
+                        "trim_method": method,
+                        "mapper": mapper,
+                        "mapper_option_set": mapper_opt,
+                        "count_option_set": opt_name,
+                        "contrast": cname,
+                        "status": "redundant_skipped",
+                        "message": redundancy.get("redundancy_reason", "identical_clean_matrix"),
+                        "canonical_trim_method": redundancy.get("canonical_trim_method", ""),
+                        "canonical_mapper": redundancy.get("canonical_mapper", ""),
+                        "canonical_mapper_option_set": redundancy.get("canonical_mapper_option_set", ""),
+                        "canonical_count_option_set": redundancy.get("canonical_count_option_set", ""),
+                        "fingerprint": redundancy.get("fingerprint", ""),
+                    }
+                    row.update(_empty_de_stats())
+                    all_de_stats[key] = row
+                continue
 
             count_matrix_path = resolve_count_matrix(
                 results_dir, method, mapper, mapper_opt, opt_name
@@ -488,6 +559,24 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                     "Count matrix not found for %s/%s/%s/%s -- skipping",
                     method, mapper, mapper_opt, opt_name,
                 )
+                for cname in contrast_names:
+                    key = (method, mapper, mapper_opt, opt_name, cname)
+                    row = {
+                        "trim_method": method,
+                        "mapper": mapper,
+                        "mapper_option_set": mapper_opt,
+                        "count_option_set": opt_name,
+                        "contrast": cname,
+                        "status": "count_matrix_missing",
+                        "message": "clean count matrix not found",
+                        "canonical_trim_method": "",
+                        "canonical_mapper": "",
+                        "canonical_mapper_option_set": "",
+                        "canonical_count_option_set": "",
+                        "fingerprint": "",
+                    }
+                    row.update(_empty_de_stats())
+                    all_de_stats[key] = row
                 continue
 
             sample_desc = de_dir / "sample_description.txt"
@@ -495,16 +584,66 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
 
             if method_backend == "wrapper":
                 logger.info("  Running DESeq2_wrapper...")
-                run_deseq2_wrapper(count_matrix_path, sample_desc, de_dir, cfg)
-                de_all = de_dir / "DESeq2.de_all.tsv"
-                if de_all.exists():
-                    stats = count_degs(de_all, fdr)
-                    stats["trim_method"] = method
-                    stats["mapper"] = mapper
-                    stats["mapper_option_set"] = mapper_opt
-                    stats["count_option_set"] = opt_name
-                    stats["contrast"] = "auto"
-                    all_de_stats.append(stats)
+                key = (method, mapper, mapper_opt, opt_name, "auto")
+                try:
+                    run_deseq2_wrapper(count_matrix_path, sample_desc, de_dir, cfg)
+                    de_all = de_dir / "DESeq2.de_all.tsv"
+                    if de_all.exists():
+                        stats = count_degs(de_all, fdr)
+                        row = {
+                            "trim_method": method,
+                            "mapper": mapper,
+                            "mapper_option_set": mapper_opt,
+                            "count_option_set": opt_name,
+                            "contrast": "auto",
+                            "status": "completed",
+                            "message": "",
+                            "canonical_trim_method": "",
+                            "canonical_mapper": "",
+                            "canonical_mapper_option_set": "",
+                            "canonical_count_option_set": "",
+                            "fingerprint": "",
+                        }
+                        row.update(stats)
+                        all_de_stats[key] = row
+                    else:
+                        msg = f"DE output missing after wrapper run: {de_all}"
+                        integrity_issues.append(msg)
+                        row = {
+                            "trim_method": method,
+                            "mapper": mapper,
+                            "mapper_option_set": mapper_opt,
+                            "count_option_set": opt_name,
+                            "contrast": "auto",
+                            "status": "missing_output",
+                            "message": msg,
+                            "canonical_trim_method": "",
+                            "canonical_mapper": "",
+                            "canonical_mapper_option_set": "",
+                            "canonical_count_option_set": "",
+                            "fingerprint": "",
+                        }
+                        row.update(_empty_de_stats())
+                        all_de_stats[key] = row
+                except Exception as exc:
+                    msg = f"DE wrapper failed for {method}/{mapper}/{mapper_opt}/{opt_name}/auto: {exc}"
+                    integrity_issues.append(msg)
+                    row = {
+                        "trim_method": method,
+                        "mapper": mapper,
+                        "mapper_option_set": mapper_opt,
+                        "count_option_set": opt_name,
+                        "contrast": "auto",
+                        "status": "de_failed",
+                        "message": str(exc),
+                        "canonical_trim_method": "",
+                        "canonical_mapper": "",
+                        "canonical_mapper_option_set": "",
+                        "canonical_count_option_set": "",
+                        "fingerprint": "",
+                    }
+                    row.update(_empty_de_stats())
+                    all_de_stats[key] = row
 
             elif method_backend == "pydeseq2":
                 for contrast in comparisons:
@@ -513,46 +652,150 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                     den = contrast["denominator"]
                     contrast_dir = de_dir / cname
                     logger.info("  Contrast: %s (%s vs %s)", cname, num, den)
-                    run_pydeseq2(
-                        count_matrix_path, samples,
-                        cname, num, den, contrast_dir, cfg,
-                    )
-                    de_all = contrast_dir / "de_all.tsv"
-                    stats = count_degs(de_all, fdr)
-                    stats["trim_method"] = method
-                    stats["mapper"] = mapper
-                    stats["mapper_option_set"] = mapper_opt
-                    stats["count_option_set"] = opt_name
-                    stats["contrast"] = cname
-                    all_de_stats.append(stats)
-
+                    key = (method, mapper, mapper_opt, opt_name, cname)
+                    try:
+                        run_pydeseq2(
+                            count_matrix_path, samples,
+                            cname, num, den, contrast_dir, cfg,
+                        )
+                        de_all = contrast_dir / "de_all.tsv"
+                        if de_all.exists():
+                            stats = count_degs(de_all, fdr)
+                            row = {
+                                "trim_method": method,
+                                "mapper": mapper,
+                                "mapper_option_set": mapper_opt,
+                                "count_option_set": opt_name,
+                                "contrast": cname,
+                                "status": "completed",
+                                "message": "",
+                                "canonical_trim_method": "",
+                                "canonical_mapper": "",
+                                "canonical_mapper_option_set": "",
+                                "canonical_count_option_set": "",
+                                "fingerprint": "",
+                            }
+                            row.update(stats)
+                            all_de_stats[key] = row
+                        else:
+                            msg = f"DE output missing after pydeseq2 run: {de_all}"
+                            integrity_issues.append(msg)
+                            row = {
+                                "trim_method": method,
+                                "mapper": mapper,
+                                "mapper_option_set": mapper_opt,
+                                "count_option_set": opt_name,
+                                "contrast": cname,
+                                "status": "missing_output",
+                                "message": msg,
+                                "canonical_trim_method": "",
+                                "canonical_mapper": "",
+                                "canonical_mapper_option_set": "",
+                                "canonical_count_option_set": "",
+                                "fingerprint": "",
+                            }
+                            row.update(_empty_de_stats())
+                            all_de_stats[key] = row
+                    except Exception as exc:
+                        msg = f"DE failed for {method}/{mapper}/{mapper_opt}/{opt_name}/{cname}: {exc}"
+                        integrity_issues.append(msg)
+                        row = {
+                            "trim_method": method,
+                            "mapper": mapper,
+                            "mapper_option_set": mapper_opt,
+                            "count_option_set": opt_name,
+                            "contrast": cname,
+                            "status": "de_failed",
+                            "message": str(exc),
+                            "canonical_trim_method": "",
+                            "canonical_mapper": "",
+                            "canonical_mapper_option_set": "",
+                            "canonical_count_option_set": "",
+                            "fingerprint": "",
+                        }
+                        row.update(_empty_de_stats())
+                        all_de_stats[key] = row
             else:
                 raise ValueError(
                     f"Unknown deseq2.method: '{method_backend}'. "
                     "Use 'pydeseq2' or 'wrapper'."
                 )
 
-    # Write DE summary
+    # Ensure every expected branch/contrast is represented exactly once.
+    expected_keys: List[Tuple[str, str, str, str, str]] = []
+    for unit in mapping_units:
+        for opt_name in option_sets:
+            for cname in contrast_names:
+                expected_keys.append(
+                    (unit["method"], unit["mapper"], unit["mapper_option_set"], opt_name, cname)
+                )
+
+    for key in expected_keys:
+        if key in all_de_stats:
+            continue
+        method, mapper, mapper_opt, opt_name, cname = key
+        msg = "DE summary slot missing from run accounting"
+        integrity_issues.append(f"{msg}: {method}/{mapper}/{mapper_opt}/{opt_name}/{cname}")
+        row = {
+            "trim_method": method,
+            "mapper": mapper,
+            "mapper_option_set": mapper_opt,
+            "count_option_set": opt_name,
+            "contrast": cname,
+            "status": "malformed",
+            "message": msg,
+            "canonical_trim_method": "",
+            "canonical_mapper": "",
+            "canonical_mapper_option_set": "",
+            "canonical_count_option_set": "",
+            "fingerprint": "",
+        }
+        row.update(_empty_de_stats())
+        all_de_stats[key] = row
+
     de_summary_path = results_dir / "de_summary.tsv"
-    if all_de_stats:
-        with open(de_summary_path, "w", newline="", encoding="utf-8") as fh:
-            fields = [
-                "trim_method",
-                "mapper",
-                "mapper_option_set",
-                "count_option_set",
-                "contrast",
-                "total_tested",
-                "sig_up",
-                "sig_down",
-                "sig_total",
-            ]
-            writer = csv.DictWriter(fh, fieldnames=fields, delimiter="\t",
-                                    extrasaction="ignore")
-            writer.writeheader()
-            for row in all_de_stats:
-                writer.writerow(row)
-        logger.info("DE summary -> %s", de_summary_path)
+    fields = [
+        "trim_method",
+        "mapper",
+        "mapper_option_set",
+        "count_option_set",
+        "contrast",
+        "status",
+        "message",
+        "total_tested",
+        "sig_up",
+        "sig_down",
+        "sig_total",
+        "canonical_trim_method",
+        "canonical_mapper",
+        "canonical_mapper_option_set",
+        "canonical_count_option_set",
+        "fingerprint",
+    ]
+    with open(de_summary_path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fields, delimiter="\t", extrasaction="ignore")
+        writer.writeheader()
+        for key in sorted(all_de_stats.keys()):
+            writer.writerow(all_de_stats[key])
+    logger.info("DE summary -> %s", de_summary_path)
+
+    status_counts: Dict[str, int] = {}
+    for row in all_de_stats.values():
+        status = str(row.get("status", "unknown"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+    logger.info(
+        "DE summary statuses: %s",
+        ", ".join(f"{k}={v}" for k, v in sorted(status_counts.items())),
+    )
+
+    if integrity_issues:
+        for msg in integrity_issues:
+            logger.warning("DE summary integrity: %s", msg)
+        if strict_mode:
+            raise RuntimeError(
+                "DE summary integrity checks failed in strict mode. "
+                "Inspect de_summary.tsv status/message columns."
+            )
 
     logger.info("STEP 09 complete.\n")
 

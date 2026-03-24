@@ -35,13 +35,12 @@ from src.utils import (
 from src.analysis_unit import (
     AnalysisUnit,
     build_full_analysis_units,
-    build_mapping_units,
     infer_analysis_units_from_de_summary,
-    mapping_unit_label,
     resolve_de_dir,
     resolve_de_base_legacy,
-    unit_label,
     write_selected_analysis,
+    write_selected_count_comparison,
+    write_selected_visualisation,
 )
 
 logger = logging.getLogger(__name__)
@@ -305,90 +304,208 @@ def count_degs_at_thresholds(
 # Selected-branch logic
 # ---------------------------------------------------------------------------
 
-def _select_primary_branch(
+def _to_float(value: str) -> Optional[float]:
+    try:
+        return float(str(value).replace("%", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_unit_metrics(
+    units: List[AnalysisUnit],
+    mapping_data: List[Dict[str, str]],
+    fc_data: List[Dict[str, str]],
+    filtering_data: List[Dict[str, str]],
+    de_summary_data: List[Dict[str, str]],
+    redundancy_data: List[Dict[str, str]],
+) -> Dict[AnalysisUnit, Dict[str, Any]]:
+    metrics: Dict[AnalysisUnit, Dict[str, Any]] = {
+        au: {
+            "uniq_vals": [],
+            "assigned_vals": [],
+            "unassigned_no_features_vals": [],
+            "unassigned_multimapping_vals": [],
+            "genes_in_vals": [],
+            "genes_out_vals": [],
+            "de_tested": 0,
+            "de_sig": 0,
+            "de_completed_rows": 0,
+            "de_any_valid": False,
+            "is_redundant": False,
+            "canonical_label": "",
+        }
+        for au in units
+    }
+
+    map_by_key = defaultdict(list)
+    for row in mapping_data:
+        key = (
+            row.get("trim_method", row.get("method", "")),
+            row.get("mapper", "star"),
+            row.get("mapper_option_set", "default"),
+        )
+        map_by_key[key].append(row)
+    for au in units:
+        for row in map_by_key[(au.method, au.mapper, au.mapper_option_set)]:
+            uniq = _to_float(row.get("uniquely_mapped_pct", ""))
+            if uniq is not None:
+                metrics[au]["uniq_vals"].append(uniq)
+
+    for row in fc_data:
+        key = (
+            row.get("trim_method", row.get("method", "")),
+            row.get("mapper", "star"),
+            row.get("mapper_option_set", "default"),
+            row.get("option_set", row.get("count_option_set", "default")),
+        )
+        for au in units:
+            if (au.method, au.mapper, au.mapper_option_set, au.count_option_set) != key:
+                continue
+            assigned = _to_float(row.get("Assigned_pct", ""))
+            if assigned is not None:
+                metrics[au]["assigned_vals"].append(assigned)
+            no_feat = _to_float(
+                row.get("Unassigned_NoFeatures", row.get("Unassigned_No_Features", ""))
+            )
+            if no_feat is not None:
+                metrics[au]["unassigned_no_features_vals"].append(no_feat)
+            multi = _to_float(row.get("Unassigned_MultiMapping", ""))
+            if multi is not None:
+                metrics[au]["unassigned_multimapping_vals"].append(multi)
+
+    for row in filtering_data:
+        key = (
+            row.get("trim_method", row.get("method", "")),
+            row.get("mapper", "star"),
+            row.get("mapper_option_set", "default"),
+            row.get("option_set", row.get("count_option_set", "default")),
+        )
+        for au in units:
+            if (au.method, au.mapper, au.mapper_option_set, au.count_option_set) != key:
+                continue
+            genes_in = _to_float(row.get("genes_in", ""))
+            genes_out = _to_float(row.get("genes_out", ""))
+            if genes_in is not None:
+                metrics[au]["genes_in_vals"].append(genes_in)
+            if genes_out is not None:
+                metrics[au]["genes_out_vals"].append(genes_out)
+
+    for row in de_summary_data:
+        key = (
+            row.get("trim_method", row.get("method", "")),
+            row.get("mapper", "star"),
+            row.get("mapper_option_set", "default"),
+            row.get("count_option_set", "default"),
+        )
+        status = str(row.get("status", "completed")).strip().lower()
+        for au in units:
+            if (au.method, au.mapper, au.mapper_option_set, au.count_option_set) != key:
+                continue
+            if status == "completed":
+                tested = int(float(row.get("total_tested", "0") or 0))
+                sig = int(float(row.get("sig_total", "0") or 0))
+                metrics[au]["de_tested"] += tested
+                metrics[au]["de_sig"] += sig
+                metrics[au]["de_completed_rows"] += 1
+                metrics[au]["de_any_valid"] = True
+
+    for row in redundancy_data:
+        key = (
+            row.get("trim_method", ""),
+            row.get("mapper", "star"),
+            row.get("mapper_option_set", "default"),
+            row.get("count_option_set", "default"),
+        )
+        is_redundant = str(row.get("is_redundant", "")).strip().lower() in {"1", "true", "yes"}
+        if not is_redundant:
+            continue
+        canonical = "/".join([
+            row.get("canonical_trim_method", ""),
+            row.get("canonical_mapper", ""),
+            row.get("canonical_mapper_option_set", ""),
+            row.get("canonical_count_option_set", ""),
+        ])
+        for au in units:
+            if (au.method, au.mapper, au.mapper_option_set, au.count_option_set) == key:
+                metrics[au]["is_redundant"] = True
+                metrics[au]["canonical_label"] = canonical
+
+    return metrics
+
+
+def _mean(values: List[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _select_count_comparison_branch(
     cfg: Dict[str, Any],
     results_dir: Path,
     units: List[AnalysisUnit],
-    fc_data: List[Dict[str, str]],
-    comparisons: List[Dict[str, str]],
-    fdr: float,
-) -> Optional[AnalysisUnit]:
-    """Select the primary analysis branch and write selected_analysis.tsv.
-
-    Selection rules:
-    1. If config has ``selected_branch``, use that.
-    2. Otherwise, among units with valid DE outputs and non-multimapper
-       count options, pick the one with the highest mean assigned-read %.
-    3. Tie-break: prefer 'default' mapper_option_set, then 'strict'.
-    """
-    sb = cfg.get("selected_branch")
-    if sb:
-        manual = AnalysisUnit(
-            method=sb.get("trim_method", ""),
-            mapper=sb.get("mapper", "star"),
-            mapper_option_set=sb.get("mapper_option_set", "default"),
-            count_option_set=sb.get("count_option_set", "default"),
+    metrics: Dict[AnalysisUnit, Dict[str, Any]],
+) -> Tuple[Optional[AnalysisUnit], str]:
+    manual = cfg.get("selected_count_comparison") or cfg.get("selected_branch")
+    if manual:
+        au = AnalysisUnit(
+            method=manual.get("trim_method", ""),
+            mapper=manual.get("mapper", "star"),
+            mapper_option_set=manual.get("mapper_option_set", "default"),
+            count_option_set=manual.get("count_option_set", "default"),
         )
-        write_selected_analysis(results_dir, manual, reason="manual_config")
-        return manual
+        write_selected_count_comparison(results_dir, au, reason="manual_config")
+        return au, "manual_config"
 
-    if not units:
-        return None
-
-    option_sets = cfg.get("featurecounts", {}).get("option_sets", {})
-    multimapper_opts = {
-        name for name, params in option_sets.items()
-        if isinstance(params, dict) and params.get("M", False)
-    }
-
-    # Build assigned-% aggregates from fc_data
-    assigned_pct: Dict[Tuple[str, str, str, str], float] = {}
-    if fc_data:
-        option_stats = summarize_featurecounts_options(fc_data)
-        for (method, mapper, mapper_opt, opt), stats in option_stats.items():
-            pct = (100.0 * stats["sum"] / stats["total_sum"]
-                   if stats["total_sum"] > 0 else 0.0)
-            assigned_pct[(method, mapper, mapper_opt, opt)] = pct
-
-    # Filter to units with valid DE output and non-multimapper
-    candidates: List[Tuple[float, int, AnalysisUnit]] = []
+    ranked: List[Tuple[Tuple[float, float, float, int, int], AnalysisUnit]] = []
     for au in units:
-        if au.count_option_set in multimapper_opts:
+        m = metrics[au]
+        if m["is_redundant"]:
             continue
+        valid = 1 if m["de_any_valid"] else 0
+        prefer = 0
+        if au.method == "none" and au.mapper == "star" and au.mapper_option_set == "default":
+            prefer = 4
+        assigned = _mean(m["assigned_vals"])
+        retained = _mean(m["genes_out_vals"])
+        non_redundant = 1
+        ranked.append(((valid, prefer, assigned, int(retained), non_redundant), au))
 
-        has_de = False
-        for contrast in comparisons:
-            de_path = _resolve_de_all(results_dir, au, contrast["name"])
-            if de_path is not None and de_path.exists():
-                has_de = True
-                break
-        if not has_de:
-            continue
+    if not ranked:
+        return None, "no_candidates"
 
-        pct = assigned_pct.get(
-            (au.method, au.mapper, au.mapper_option_set, au.count_option_set), 0.0
-        )
-        # Tie-break ordering: prefer "default" mapper_opt then "strict" count_opt
-        tiebreak = 0
-        if au.mapper_option_set == "default":
-            tiebreak += 2
-        if au.count_option_set == "strict":
-            tiebreak += 1
-
-        candidates.append((pct, tiebreak, au))
-
-    if not candidates:
-        # Fall back to first unit
-        write_selected_analysis(results_dir, units[0], reason="fallback_first_unit")
-        return units[0]
-
-    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    best = candidates[0][2]
-    write_selected_analysis(
-        results_dir, best,
-        reason="highest_assigned_pct_with_valid_de",
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    chosen = ranked[0][1]
+    write_selected_count_comparison(
+        results_dir, chosen, reason="auto_prefer_none_star_default_with_valid_de"
     )
-    return best
+    return chosen, "auto_prefer_none_star_default_with_valid_de"
+
+
+def _select_visualisation_branch(
+    cfg: Dict[str, Any],
+    results_dir: Path,
+    units: List[AnalysisUnit],
+) -> Tuple[Optional[AnalysisUnit], str]:
+    manual = cfg.get("selected_visualisation")
+    if manual:
+        au = AnalysisUnit(
+            method=manual.get("trim_method", ""),
+            mapper=manual.get("mapper", "star"),
+            mapper_option_set=manual.get("mapper_option_set", "strict_unique"),
+            count_option_set=manual.get("count_option_set", "default"),
+        )
+        write_selected_visualisation(results_dir, au, reason="manual_config")
+        return au, "manual_config"
+
+    preferred = AnalysisUnit("none", "star", "strict_unique", "default")
+    if preferred in units:
+        write_selected_visualisation(results_dir, preferred, reason="auto_prefer_none_star_strict_unique_default")
+        return preferred, "auto_prefer_none_star_strict_unique_default"
+
+    fallback = next((u for u in units if u.method == "none" and u.mapper == "star"), None)
+    if fallback is None and units:
+        fallback = units[0]
+    if fallback:
+        write_selected_visualisation(results_dir, fallback, reason="fallback_available_star_branch")
+    return fallback, "fallback_available_star_branch"
 
 
 # ---------------------------------------------------------------------------
@@ -403,301 +520,113 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
 
     results_dir = Path(cfg["_results_dir"])
     methods = methods_override or get_enabled_methods(cfg)
-    comparisons = cfg.get("comparisons", [])
-    fdr = cfg.get("deseq2", {}).get("fdr_threshold", 0.05)
     option_sets = cfg["featurecounts"].get("option_sets", {"default": {}})
 
     units = infer_analysis_units_from_de_summary(results_dir, methods)
     if not units:
         units = build_full_analysis_units(results_dir, methods, option_sets)
 
+    mapping_data = read_tsv(results_dir / "mapping_summary.tsv")
+    fc_data = read_tsv(results_dir / "featurecounts_summary.tsv")
+    filtering_data = read_tsv(results_dir / "filtering_summary.tsv")
+    de_summary_data = read_tsv(results_dir / "de_summary.tsv")
+    redundancy_data = read_tsv(results_dir / "redundancy_summary.tsv")
+
+    metrics = _build_unit_metrics(
+        units, mapping_data, fc_data, filtering_data, de_summary_data, redundancy_data
+    )
+
+    selected_count, count_reason = _select_count_comparison_branch(cfg, results_dir, units, metrics)
+    selected_vis, vis_reason = _select_visualisation_branch(cfg, results_dir, units)
+
+    # Legacy compatibility: keep selected_analysis.tsv as count-comparison selection.
+    if selected_count is not None:
+        write_selected_analysis(results_dir, selected_count, reason=f"compat_from_count_comparison:{count_reason}")
+
     report_dir = results_dir / "reports"
     ensure_dirs(report_dir)
 
-    comparison_lines: List[str] = []
-    comparison_lines.append("# Method and Parameter Comparison\n")
-    comparison_lines.append(
-        f"Analysis units: {', '.join(au.label for au in units)}\n"
+    lines: List[str] = []
+    lines.append("# Method and Parameter Comparison")
+    lines.append("")
+    lines.append("## Selection Outcomes")
+    lines.append(f"- Selected count-comparison branch: `{selected_count.label if selected_count else 'N/A'}` ({count_reason})")
+    lines.append(f"- Selected visualisation branch: `{selected_vis.label if selected_vis else 'N/A'}` ({vis_reason})")
+    lines.append("- Count comparison focuses on featureCounts option interpretation.")
+    lines.append("- Visualisation branch is used for selected-only BigWig generation.")
+    lines.append("")
+
+    lines.append("## Branch Summary")
+    lines.append(
+        "| Branch | Role | Mean uniquely mapped % | Mean assigned % | "
+        "Mean unassigned_no_features % | Mean unassigned_multimapping % | "
+        "Genes before filtering | Genes after filtering | Genes removed | "
+        "DE tested genes | DE significant genes | Redundancy | Selection |"
+    )
+    lines.append(
+        "|--------|------|------------------------|------------------|"
+        "-----------------------------|-------------------------------|"
+        "------------------------|-----------------------|--------------|"
+        "-----------------|---------------------|-----------|-----------|"
     )
 
-    # === 1. Mapping rate comparison =========================================
-    comparison_lines.append("\n## Mapping Rates\n")
-    mapping_data = read_tsv(results_dir / "mapping_summary.tsv")
-    if mapping_data:
-        comparison_lines.append(
-            "| Trim Method | Mapper | Mapper Option | Sample | Uniquely Mapped % | Multi-Mapped % |"
-        )
-        comparison_lines.append(
-            "|-------------|--------|---------------|--------|-------------------|----------------|"
-        )
-        for row in mapping_data:
-            method = row.get("trim_method", row.get("method", ""))
-            comparison_lines.append(
-                f"| {method} | {row.get('mapper', 'star')} | {row.get('mapper_option_set', 'default')} "
-                f"| {row.get('sample', '')} "
-                f"| {row.get('uniquely_mapped_pct', 'N/A')} "
-                f"| {row.get('multi_mapped_pct', 'N/A')} |"
-            )
-    else:
-        comparison_lines.append("*(Mapping summary not available)*\n")
+    redundant_lines: List[str] = []
+    for au in sorted(units):
+        m = metrics[au]
+        uniq = _mean(m["uniq_vals"])
+        assigned = _mean(m["assigned_vals"])
+        no_feat = _mean(m["unassigned_no_features_vals"])
+        multi = _mean(m["unassigned_multimapping_vals"])
+        genes_in = _mean(m["genes_in_vals"])
+        genes_out = _mean(m["genes_out_vals"])
+        genes_removed = max(0.0, genes_in - genes_out)
 
-    # === 1b. Mapper option impact ===========================================
-    comparison_lines.append("\n## Mapper Option Impact\n")
-    if mapping_data:
-        agg: Dict[Tuple[str, str, str], Dict[str, float]] = defaultdict(
-            lambda: {"n": 0.0, "uniq_sum": 0.0}
-        )
-        for row in mapping_data:
-            method = row.get("trim_method", row.get("method", ""))
-            mapper = row.get("mapper", "star")
-            mapper_opt = row.get("mapper_option_set", "default")
-            uniq_pct = row.get("uniquely_mapped_pct", "").replace("%", "")
-            try:
-                uniq_val = float(uniq_pct)
-            except ValueError:
-                continue
-            key = (method, mapper, mapper_opt)
-            agg[key]["n"] += 1
-            agg[key]["uniq_sum"] += uniq_val
-        comparison_lines.append(
-            "| Trim Method | Mapper | Mapper Option | N samples | Mean uniquely mapped % |"
-        )
-        comparison_lines.append(
-            "|-------------|--------|---------------|-----------|------------------------|"
-        )
-        for (method, mapper, mapper_opt), stats in sorted(agg.items()):
-            mean = stats["uniq_sum"] / stats["n"] if stats["n"] else 0.0
-            comparison_lines.append(
-                f"| {method} | {mapper} | {mapper_opt} | {int(stats['n'])} | {mean:.2f}% |"
-            )
-    else:
-        comparison_lines.append("*(Mapper option impact unavailable)*\n")
-
-    # === 2. Assigned reads comparison =======================================
-    comparison_lines.append("\n## featureCounts Assigned Reads\n")
-    fc_data = read_tsv(results_dir / "featurecounts_summary.tsv")
-    if fc_data:
-        comparison_lines.append(
-            "| Trim Method | Mapper | Mapper Option | Count Option Set | Sample | Assigned Reads |"
-        )
-        comparison_lines.append(
-            "|-------------|--------|---------------|------------------|--------|----------------|"
-        )
-        for row in fc_data:
-            method = row.get("trim_method", row.get("method", ""))
-            comparison_lines.append(
-                f"| {method} | {row.get('mapper', 'star')} | {row.get('mapper_option_set', 'default')} "
-                f"| {row.get('option_set', '')} "
-                f"| {row.get('sample', '')} | {row.get('Assigned', row.get('assigned_reads', 'N/A'))} |"
-            )
-    else:
-        comparison_lines.append("*(featureCounts summary not available)*\n")
-
-    # === 2b. featureCounts option-set impact ================================
-    comparison_lines.append("\n## featureCounts Option-Set Impact\n")
-    if fc_data:
-        option_stats = summarize_featurecounts_options(fc_data)
-        comparison_lines.append(
-            "| Trim Method | Mapper | Mapper Option | Count Option Set | N samples "
-            "| Mean assigned reads | Mean assigned % | Min | Max |"
-        )
-        comparison_lines.append(
-            "|-------------|--------|---------------|------------------|----------"
-            "|---------------------|-----------------|-----|-----|"
-        )
-        for (method, mapper, mapper_opt, opt), stats in sorted(option_stats.items()):
-            n = int(stats["n"])
-            mean = stats["sum"] / stats["n"] if stats["n"] else 0.0
-            mean_pct = (100.0 * stats["sum"] / stats["total_sum"]
-                        if stats["total_sum"] > 0 else 0.0)
-            min_v = int(stats["min"]) if n else 0
-            max_v = int(stats["max"]) if n else 0
-            comparison_lines.append(
-                f"| {method} | {mapper} | {mapper_opt} | {opt} | {n} "
-                f"| {mean:.1f} | {mean_pct:.1f}% | {min_v} | {max_v} |"
-            )
-
-        # Delta versus default per trim+mapper+mapper_option
-        comparison_lines.append("\n### Delta vs default option set\n")
-        comparison_lines.append(
-            "| Trim Method | Mapper | Mapper Option | Count Option Set | Mean assigned | Delta vs default |"
-        )
-        comparison_lines.append(
-            "|-------------|--------|---------------|------------------|---------------|------------------|"
-        )
-        by_unit: Dict[Tuple[str, str, str], Dict[str, float]] = defaultdict(dict)
-        for (method, mapper, mapper_opt, opt), stats in option_stats.items():
-            mean = stats["sum"] / stats["n"] if stats["n"] else 0.0
-            by_unit[(method, mapper, mapper_opt)][opt] = mean
-        for (method, mapper, mapper_opt), opt_map in sorted(by_unit.items()):
-            base = opt_map.get("default")
-            for opt, mean in sorted(opt_map.items()):
-                if base is None:
-                    delta = "N/A"
-                else:
-                    delta = f"{mean - base:+.1f}"
-                comparison_lines.append(
-                    f"| {method} | {mapper} | {mapper_opt} | {opt} | {mean:.1f} | {delta} |"
-                )
-    else:
-        comparison_lines.append("*(featureCounts option impact unavailable)*\n")
-
-    # === 3. Normalised count correlation ====================================
-    comparison_lines.append("\n## Normalised Count Correlation Between Analysis Units\n")
-    if len(units) >= 2 and comparisons:
-        contrast = comparisons[0]["name"]
-        norm_counts_by_unit: Dict[str, Dict[str, List[float]]] = {}
-        for au in units:
-            nc = load_norm_counts(results_dir, au, contrast)
-            if nc:
-                norm_counts_by_unit[au.label] = nc
-
-        if len(norm_counts_by_unit) >= 2:
-            comparison_lines.append(f"*(Contrast: {contrast})*\n")
-            comparison_lines.append("| Unit A | Unit B | Pearson r |")
-            comparison_lines.append("|----------|----------|-----------|")
-            mlist = sorted(norm_counts_by_unit.keys())
-            for i in range(len(mlist)):
-                for j in range(i + 1, len(mlist)):
-                    r = compute_correlation(
-                        norm_counts_by_unit[mlist[i]],
-                        norm_counts_by_unit[mlist[j]],
-                    )
-                    r_str = f"{r:.6f}" if r is not None else "N/A"
-                    comparison_lines.append(
-                        f"| {mlist[i]} | {mlist[j]} | {r_str} |"
-                    )
+        if m["is_redundant"]:
+            role = "redundant"
+        elif selected_vis is not None and au == selected_vis:
+            role = "visualisation"
+        elif au.method == "none" and au.mapper == "star" and au.mapper_option_set == "default":
+            role = "count_comparison"
         else:
-            comparison_lines.append("*(Not enough normalised count data for correlation)*\n")
+            role = "alternative"
+
+        selection = []
+        if selected_count is not None and au == selected_count:
+            selection.append("selected_count")
+        if selected_vis is not None and au == selected_vis:
+            selection.append("selected_visualisation")
+        selection_label = ",".join(selection) if selection else "-"
+
+        redundancy_label = "no"
+        if m["is_redundant"]:
+            redundancy_label = f"duplicate_of:{m['canonical_label']}"
+            redundant_lines.append(f"- `{au.label}` duplicates `{m['canonical_label']}`")
+
+        lines.append(
+            f"| `{au.label}` | {role} | {uniq:.2f} | {assigned:.2f} | {no_feat:.2f} | {multi:.2f} | "
+            f"{int(genes_in)} | {int(genes_out)} | {int(genes_removed)} | "
+            f"{int(m['de_tested'])} | {int(m['de_sig'])} | {redundancy_label} | {selection_label} |"
+        )
+
+    lines.append("")
+    lines.append("## Redundant Branches")
+    if redundant_lines:
+        lines.extend(redundant_lines)
     else:
-        comparison_lines.append("*(Need >= 2 analysis units and >= 1 contrast)*\n")
+        lines.append("- No redundant branches detected.")
 
-    # === 4. DEG overlap =====================================================
-    comparison_lines.append("\n## DEG Overlap Between Analysis Units\n")
-    for contrast in comparisons:
-        cname = contrast["name"]
-        comparison_lines.append(f"\n### Contrast: {cname}\n")
-
-        deg_sets: Dict[str, Set[str]] = {}
-        for au in units:
-            degs = load_de_genes(results_dir, au, cname, fdr)
-            deg_sets[au.label] = degs
-            comparison_lines.append(f"- **{au.label}**: {len(degs)} DEGs (FDR < {fdr})")
-
-        if len(units) >= 2:
-            comparison_lines.append("\n| Unit A | Unit B | A only | Shared | B only |")
-            comparison_lines.append("|----------|----------|--------|--------|--------|")
-            mlist = sorted(deg_sets.keys())
-            for i in range(len(mlist)):
-                for j in range(i + 1, len(mlist)):
-                    a = deg_sets[mlist[i]]
-                    b = deg_sets[mlist[j]]
-                    shared = len(a & b)
-                    a_only = len(a - b)
-                    b_only = len(b - a)
-                    comparison_lines.append(
-                        f"| {mlist[i]} | {mlist[j]} | {a_only} | {shared} | {b_only} |"
-                    )
-
-    # === 5. Method-sensitive genes ==========================================
-    comparison_lines.append("\n## Method-Sensitive Genes (padj flips)\n")
-    comparison_lines.append(
-        "Genes that are significant in one analysis unit but not another "
-        f"(padj flip across {fdr}).\n"
+    lines.append("")
+    lines.append("## Why These Branches Were Selected")
+    lines.append(
+        f"- Count-comparison selection uses valid DE output, assigned percentage, genes retained, and non-redundancy; chosen: `{selected_count.label if selected_count else 'N/A'}`."
+    )
+    lines.append(
+        f"- Visualisation selection prioritises `none/star/strict_unique/default` for unique-mapper BigWig generation; chosen: `{selected_vis.label if selected_vis else 'N/A'}`."
     )
 
-    for contrast in comparisons:
-        cname = contrast["name"]
-        comparison_lines.append(f"\n### {cname}\n")
-
-        padj_maps: Dict[str, Dict[str, float]] = {}
-        for au in units:
-            padj_maps[au.label] = load_padj_dict(results_dir, au, cname)
-
-        if len(units) < 2:
-            comparison_lines.append("*(Need >= 2 analysis units)*\n")
-            continue
-
-        all_genes: Set[str] = set()
-        for pm in padj_maps.values():
-            all_genes.update(pm.keys())
-
-        flipped: List[Dict[str, str]] = []
-        mlist = sorted(padj_maps.keys())
-        for gene in sorted(all_genes):
-            for i in range(len(mlist)):
-                for j in range(i + 1, len(mlist)):
-                    p_a = padj_maps[mlist[i]].get(gene)
-                    p_b = padj_maps[mlist[j]].get(gene)
-                    if p_a is not None and p_b is not None:
-                        sig_a = p_a < fdr
-                        sig_b = p_b < fdr
-                        if sig_a != sig_b:
-                            flipped.append({
-                                "gene": gene,
-                                "method_a": mlist[i],
-                                "padj_a": f"{p_a:.2e}",
-                                "method_b": mlist[j],
-                                "padj_b": f"{p_b:.2e}",
-                            })
-
-        if flipped:
-            comparison_lines.append(
-                f"Found {len(flipped)} method-sensitive gene-pair instances:\n"
-            )
-            comparison_lines.append("| Gene | Method A | padj A | Method B | padj B |")
-            comparison_lines.append("|------|----------|--------|----------|--------|")
-            for entry in flipped[:50]:
-                comparison_lines.append(
-                    f"| {entry['gene']} | {entry['method_a']} | {entry['padj_a']} "
-                    f"| {entry['method_b']} | {entry['padj_b']} |"
-                )
-            if len(flipped) > 50:
-                comparison_lines.append(f"\n*(... and {len(flipped) - 50} more)*\n")
-        else:
-            comparison_lines.append("No method-sensitive genes detected.\n")
-
-    # === 6. DE threshold sensitivity ========================================
-    comparison_lines.append("\n## DE Threshold Sensitivity\n")
-    comparison_lines.append(
-        "Counts of significant genes under different thresholds "
-        "(computed from existing `de_all.tsv`, no rerun required).\n"
-    )
-    fdr_values = [0.01, 0.05, 0.1]
-    comparison_lines.append(
-        "| Trim Method | Mapper | Mapper Opt | Count Opt | Contrast "
-        "| FDR<0.01 | FDR<0.05 | FDR<0.1 | FDR<0.05 & |log2FC|>=1 |"
-    )
-    comparison_lines.append(
-        "|-------------|--------|-----------|-----------|----------"
-        "|----------|----------|---------|-----------------------|"
-    )
-    for au in units:
-        for contrast in comparisons:
-            cname = contrast["name"]
-            de_path = _resolve_de_all(results_dir, au, cname)
-            if de_path is None:
-                de_path = Path("/dev/null")  # count_degs_at_thresholds handles missing
-            stats = count_degs_at_thresholds(de_path, fdr_values)
-            comparison_lines.append(
-                f"| {au.method} | {au.mapper} | {au.mapper_option_set} "
-                f"| {au.count_option_set} | {cname} | {stats['fdr_0.01']} | "
-                f"{stats['fdr_0.05']} | {stats['fdr_0.1']} | "
-                f"{stats['fdr_0.05_lfc1']} |"
-            )
-
-    # --- Write comparison report --------------------------------------------
     report_path = report_dir / "method_comparison.md"
-    report_path.write_text("\n".join(comparison_lines), encoding="utf-8")
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     logger.info("Method comparison report -> %s", report_path)
-
-    # === 7. Select primary analysis branch ==================================
-    selected = _select_primary_branch(cfg, results_dir, units, fc_data, comparisons, fdr)
-    if selected:
-        logger.info("Selected primary branch: %s", selected.label)
-    else:
-        logger.warning("Could not determine a selected primary branch.")
-
     logger.info("STEP 10 complete.\n")
 
 

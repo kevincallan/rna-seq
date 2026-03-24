@@ -16,6 +16,12 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
+SELECTED_ROLE_FILES: Dict[str, str] = {
+    "analysis": "selected_analysis.tsv",
+    "count_comparison": "selected_count_comparison.tsv",
+    "visualisation": "selected_visualisation.tsv",
+}
+
 
 # ---------------------------------------------------------------------------
 # AnalysisUnit dataclass
@@ -292,9 +298,19 @@ def infer_analysis_units_from_de_summary(
 # Selected-branch helpers
 # ---------------------------------------------------------------------------
 
-def read_selected_analysis(results_dir: Path) -> Optional[AnalysisUnit]:
-    """Read the selected analysis branch from selected_analysis.tsv."""
-    path = results_dir / "selected_analysis.tsv"
+def _selected_path(results_dir: Path, role: str) -> Path:
+    filename = SELECTED_ROLE_FILES.get(role)
+    if filename is None:
+        raise ValueError(
+            f"Unknown selected-branch role '{role}'. "
+            f"Valid roles: {', '.join(sorted(SELECTED_ROLE_FILES))}"
+        )
+    return results_dir / filename
+
+
+def read_selected_branch(results_dir: Path, role: str) -> Optional[AnalysisUnit]:
+    """Read a selected branch file for a specific role."""
+    path = _selected_path(results_dir, role)
     if not path.exists():
         return None
     with open(path, encoding="utf-8") as fh:
@@ -309,13 +325,14 @@ def read_selected_analysis(results_dir: Path) -> Optional[AnalysisUnit]:
     return None
 
 
-def write_selected_analysis(
+def write_selected_branch(
     results_dir: Path,
     unit: AnalysisUnit,
+    role: str,
     reason: str = "",
 ) -> Path:
-    """Write the selected analysis branch to selected_analysis.tsv."""
-    path = results_dir / "selected_analysis.tsv"
+    """Write a selected branch file for a specific role."""
+    path = _selected_path(results_dir, role)
     with open(path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(
             fh,
@@ -331,5 +348,51 @@ def write_selected_analysis(
             "count_option_set": unit.count_option_set,
             "selection_reason": reason,
         })
-    logger.info("Selected analysis branch -> %s", path)
+    logger.info("Selected %s branch -> %s", role, path)
     return path
+
+
+def read_selected_analysis(results_dir: Path) -> Optional[AnalysisUnit]:
+    """Read the legacy selected analysis branch."""
+    return read_selected_branch(results_dir, "analysis")
+
+
+def write_selected_analysis(
+    results_dir: Path,
+    unit: AnalysisUnit,
+    reason: str = "",
+) -> Path:
+    """Write the legacy selected analysis branch."""
+    return write_selected_branch(results_dir, unit, role="analysis", reason=reason)
+
+
+def read_selected_count_comparison(results_dir: Path) -> Optional[AnalysisUnit]:
+    """Read selected_count_comparison.tsv."""
+    return read_selected_branch(results_dir, "count_comparison")
+
+
+def write_selected_count_comparison(
+    results_dir: Path,
+    unit: AnalysisUnit,
+    reason: str = "",
+) -> Path:
+    """Write selected_count_comparison.tsv."""
+    return write_selected_branch(
+        results_dir, unit, role="count_comparison", reason=reason
+    )
+
+
+def read_selected_visualisation(results_dir: Path) -> Optional[AnalysisUnit]:
+    """Read selected_visualisation.tsv."""
+    return read_selected_branch(results_dir, "visualisation")
+
+
+def write_selected_visualisation(
+    results_dir: Path,
+    unit: AnalysisUnit,
+    reason: str = "",
+) -> Path:
+    """Write selected_visualisation.tsv."""
+    return write_selected_branch(
+        results_dir, unit, role="visualisation", reason=reason
+    )
