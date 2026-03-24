@@ -49,6 +49,7 @@ from src.utils import (
     get_enabled_methods,
     get_run_id,
     load_config,
+    resolve_cache_dir,
     resolve_results_dir,
     resolve_work_dir,
     setup_logging,
@@ -564,6 +565,7 @@ def main() -> None:
     cfg["_run_id"] = run_id
     cfg["_results_dir"] = str(resolve_results_dir(cfg, run_id))
     cfg["_work_dir"] = str(resolve_work_dir(cfg))
+    cfg["_cache_dir"] = str(resolve_cache_dir(cfg))
 
     if args.command == "run" and getattr(args, "threads", None) is not None:
         cfg["project"]["threads"] = args.threads

@@ -26,6 +26,7 @@ from src.utils import (
     get_tool_version,
     hash_config,
     load_config,
+    resolve_cache_dir,
     resolve_results_dir,
     resolve_work_dir,
     setup_logging,
@@ -271,12 +272,14 @@ def main(cfg: Dict[str, Any], run_id: str) -> Dict[str, Any]:
 
     # --- Create directories -------------------------------------------------
     results_dir = resolve_results_dir(cfg, run_id)
-    work_dir = resolve_work_dir(cfg)
+    work_dir = resolve_work_dir(cfg, run_id)
+    cache_dir = resolve_cache_dir(cfg)
     logs_dir = Path(cfg["project"]["logs_dir"])
 
     ensure_dirs(
         results_dir,
         work_dir,
+        cache_dir,
         work_dir / "fastq_links",
         work_dir / "trimmed",
         logs_dir,
@@ -293,7 +296,13 @@ def main(cfg: Dict[str, Any], run_id: str) -> Dict[str, Any]:
         )
 
     ensure_dirs(results_dir / "reports")
-    logger.info("Directory structure created under %s", results_dir)
+    logger.info(
+        "Directory structure created under results=%s work=%s cache=%s (run_id=%s)",
+        results_dir,
+        work_dir,
+        cache_dir,
+        run_id,
+    )
 
     # --- Write manifest -----------------------------------------------------
     write_run_manifest(cfg, run_id, tool_versions, results_dir)
@@ -302,6 +311,7 @@ def main(cfg: Dict[str, Any], run_id: str) -> Dict[str, Any]:
     cfg["_run_id"] = run_id
     cfg["_results_dir"] = str(results_dir)
     cfg["_work_dir"] = str(work_dir)
+    cfg["_cache_dir"] = str(cache_dir)
     cfg["_tool_versions"] = tool_versions
 
     logger.info("STEP 00 complete.\n")

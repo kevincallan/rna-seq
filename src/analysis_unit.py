@@ -16,6 +16,25 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
+def _bam_has_index(bam: Path) -> bool:
+    return (
+        bam.with_suffix(".bam.bai").exists()
+        or Path(str(bam) + ".bai").exists()
+        or bam.with_suffix(".bam.csi").exists()
+        or Path(str(bam) + ".csi").exists()
+    )
+
+
+def _assert_bam_ready(bam: Path, context: str) -> None:
+    if not bam.exists():
+        raise RuntimeError(f"BAM missing for {context}: {bam}")
+    if not _bam_has_index(bam):
+        raise RuntimeError(
+            f"BAM index missing for {context}: {bam}. "
+            "Expected .bai/.csi generated during mapping."
+        )
+
+
 SELECTED_ROLE_FILES: Dict[str, str] = {
     "analysis": "selected_analysis.tsv",
     "count_comparison": "selected_count_comparison.tsv",
@@ -140,6 +159,7 @@ def build_mapping_units_with_bams(
     *,
     use_filtered_bam: bool = False,
     prefer_filtered: bool = False,
+    require_ready: bool = False,
 ) -> List[Dict[str, Any]]:
     """Collect mapping units with per-sample BAM paths.
 
@@ -185,7 +205,11 @@ def build_mapping_units_with_bams(
                         "mapper_option_set": mapper_opt,
                         "sample_to_bam": {},
                     }
-                units[key]["sample_to_bam"][sample] = Path(bam_path)
+                bam = Path(bam_path)
+                if require_ready:
+                    ctx = f"{method}/{mapper}/{mapper_opt}/{sample}"
+                    _assert_bam_ready(bam, ctx)
+                units[key]["sample_to_bam"][sample] = bam
 
     if not units:
         for method in methods:
@@ -194,6 +218,9 @@ def build_mapping_units_with_bams(
             for s in samples:
                 bam = star_dir / f"{s.sample_name}_Aligned.sortedByCoord.out.bam"
                 if bam.exists():
+                    if require_ready:
+                        ctx = f"{method}/star/default/{s.sample_name}"
+                        _assert_bam_ready(bam, ctx)
                     sample_to_bam[s.sample_name] = bam
             if sample_to_bam:
                 units[(method, "star", "default")] = {

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import csv
 import logging
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -132,22 +134,114 @@ def map_sample_hisat2(
     return bam_path, log_path
 
 
-def index_bam(bam: Path, cfg: Dict[str, Any]) -> None:
-    """Index a BAM file using pysam (Python) or samtools (fallback)."""
+def _bam_context(run_id: str, sample_name: str, method: str, mapper: str, mapper_opt: str) -> str:
+    return (
+        f"run_id={run_id}, sample={sample_name}, "
+        f"branch={method}/{mapper}/{mapper_opt}"
+    )
+
+
+def validate_bam_integrity(
+    bam: Path,
+    cfg: Dict[str, Any],
+    *,
+    run_id: str,
+    sample_name: str,
+    method: str,
+    mapper: str,
+    mapper_opt: str,
+) -> None:
+    """Fail early if a BAM appears truncated/corrupt before indexing."""
+    context = _bam_context(run_id, sample_name, method, mapper, mapper_opt)
+    if not bam.exists():
+        raise RuntimeError(f"BAM missing before validation ({context}): {bam}")
+
+    samtools = cfg["tools"].get("samtools", "samtools")
+    samtools_exe = shutil.which(samtools)
+    if samtools_exe is not None:
+        quick = run_cmd(
+            [samtools_exe, "quickcheck", "-v", str(bam)],
+            description=f"samtools quickcheck {bam.name}",
+            check=False,
+        )
+        if quick.returncode != 0:
+            details = (quick.stdout or "") + "\n" + (quick.stderr or "")
+            raise RuntimeError(
+                "BAM integrity check failed before indexing. "
+                f"The BAM appears incomplete/corrupt ({context}). Path: {bam}\n"
+                "Likely causes: interrupted write, storage/I/O issue, or filesystem problem.\n"
+                "Please verify storage health and rerun this mapping branch.\n"
+                f"quickcheck output:\n{details.strip() or '(empty)'}"
+            )
+        return
+
+    # Fallback when samtools is unavailable: force a full read pass with pysam.
+    try:
+        import pysam
+        with pysam.AlignmentFile(str(bam), "rb") as fh:
+            for _ in fh.fetch(until_eof=True):
+                pass
+    except Exception as exc:
+        raise RuntimeError(
+            "BAM integrity check failed before indexing. "
+            f"The BAM appears incomplete/corrupt ({context}). Path: {bam}\n"
+            "Likely causes: interrupted write, storage/I/O issue, or filesystem problem.\n"
+            "Please verify storage health and rerun this mapping branch."
+        ) from exc
+
+
+def index_bam(
+    bam: Path,
+    cfg: Dict[str, Any],
+    *,
+    run_id: str,
+    sample_name: str,
+    method: str,
+    mapper: str,
+    mapper_opt: str,
+) -> None:
+    """Index a BAM file with actionable diagnostics on failure."""
+    context = _bam_context(run_id, sample_name, method, mapper, mapper_opt)
     try:
         import pysam
         logger.info("  Indexing %s with pysam...", bam.name)
         pysam.index(str(bam))
+        return
     except ImportError:
-        samtools = cfg["tools"].get("samtools", "samtools")
-        threads = cfg["project"].get("threads", 4)
+        pass
+    except Exception as exc:
+        raise RuntimeError(
+            "BAM indexing failed after integrity validation. "
+            f"Context: {context}. BAM: {bam}\n"
+            "Likely causes: transient I/O failure, partial write on filesystem, or index-write permission issue."
+        ) from exc
+
+    samtools = cfg["tools"].get("samtools", "samtools")
+    threads = cfg["project"].get("threads", 4)
+    try:
         run_cmd(
             [samtools, "index", "-@", str(threads), str(bam)],
             description=f"samtools index {bam.name}",
         )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "samtools index failed after integrity validation. "
+            f"Context: {context}. BAM: {bam}\n"
+            "Likely causes: transient I/O failure, partial write on filesystem, or filesystem corruption.\n"
+            f"Original stderr:\n{exc.stderr or '(empty)'}"
+        ) from exc
 
 
-def filter_bam(bam: Path, cfg: Dict[str, Any]) -> Path:
+def filter_bam(
+    bam: Path,
+    cfg: Dict[str, Any],
+    *,
+    run_id: str,
+    sample_name: str,
+    method: str,
+    mapper: str,
+    mapper_opt: str,
+) -> Path:
     """Create a quality-filtered BAM: MAPQ>=255, properly paired, no secondary/supplementary.
 
     Returns the path to the filtered BAM (indexed).
@@ -174,7 +268,24 @@ def filter_bam(bam: Path, cfg: Dict[str, Any]) -> Path:
                     outfile.write(read)
                     kept += 1
 
-    pysam.index(str(filtered))
+    validate_bam_integrity(
+        filtered,
+        cfg,
+        run_id=run_id,
+        sample_name=sample_name,
+        method=method,
+        mapper=mapper,
+        mapper_opt=mapper_opt,
+    )
+    index_bam(
+        filtered,
+        cfg,
+        run_id=run_id,
+        sample_name=sample_name,
+        method=method,
+        mapper=mapper,
+        mapper_opt=mapper_opt,
+    )
     logger.info("    Kept %d / %d reads (%.1f%%)", kept, total,
                 100.0 * kept / total if total else 0)
     return filtered
@@ -305,6 +416,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
 
     work_dir = resolve_work_dir(cfg)
     results_dir = Path(cfg["_results_dir"])
+    run_id = str(cfg.get("_run_id", "unknown"))
     samples_tsv = Path(cfg.get("_samples_tsv", results_dir / "samples.tsv"))
     samples = read_samples_tsv(samples_tsv)
     methods = methods_override or get_enabled_methods(cfg)
@@ -344,7 +456,24 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                         s.sample_name, r1, r2, index_prefix, map_out_dir, cfg, map_opt_params,
                     )
                     if bam.exists():
-                        index_bam(bam, cfg)
+                        validate_bam_integrity(
+                            bam,
+                            cfg,
+                            run_id=run_id,
+                            sample_name=s.sample_name,
+                            method=method,
+                            mapper=mapper,
+                            mapper_opt=map_opt_name,
+                        )
+                        index_bam(
+                            bam,
+                            cfg,
+                            run_id=run_id,
+                            sample_name=s.sample_name,
+                            method=method,
+                            mapper=mapper,
+                            mapper_opt=map_opt_name,
+                        )
                     summary = parse_hisat2_log(log_path)
                 else:
                     genome_dir = str(
@@ -355,7 +484,24 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                         s.sample_name, r1, r2, genome_dir, prefix, cfg, map_opt_params,
                     )
                     if bam.exists():
-                        index_bam(bam, cfg)
+                        validate_bam_integrity(
+                            bam,
+                            cfg,
+                            run_id=run_id,
+                            sample_name=s.sample_name,
+                            method=method,
+                            mapper=mapper,
+                            mapper_opt=map_opt_name,
+                        )
+                        index_bam(
+                            bam,
+                            cfg,
+                            run_id=run_id,
+                            sample_name=s.sample_name,
+                            method=method,
+                            mapper=mapper,
+                            mapper_opt=map_opt_name,
+                        )
                     else:
                         logger.error("BAM not found after STAR: %s", bam)
                         continue
@@ -363,7 +509,15 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                     raw_stats = parse_star_log(star_log)
                     summary = extract_mapping_summary(raw_stats)
 
-                filtered_bam = filter_bam(bam, cfg)
+                filtered_bam = filter_bam(
+                    bam,
+                    cfg,
+                    run_id=run_id,
+                    sample_name=s.sample_name,
+                    method=method,
+                    mapper=mapper,
+                    mapper_opt=map_opt_name,
+                )
 
                 summary["trim_method"] = method
                 summary["mapper"] = mapper

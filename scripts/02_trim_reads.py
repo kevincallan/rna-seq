@@ -336,6 +336,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
 
     work_dir = resolve_work_dir(cfg)
     results_dir = Path(cfg["_results_dir"])
+    logger.info("Using run-specific work root: %s", work_dir)
 
     # Load samples
     samples_tsv = Path(cfg.get("_samples_tsv", results_dir / "samples.tsv"))

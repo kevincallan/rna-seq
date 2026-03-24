@@ -18,6 +18,7 @@ project:
   name: "MY_PROJECT"              # TODO: short name for the dataset
   results_dir: "results"
   work_dir: "work"
+  cache_dir: "cache"              # shared reusable artifacts (for example filtered GTF cache)
   logs_dir: "logs"
   threads: 6
 

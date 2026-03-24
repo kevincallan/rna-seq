@@ -141,7 +141,9 @@ def main() -> None:
     samples = read_samples_tsv(samples_tsv)
 
     methods = args.methods or get_enabled_methods(cfg)[:1]
-    mapping_units = build_mapping_units_with_bams(results_dir, samples, methods)
+    mapping_units = build_mapping_units_with_bams(
+        results_dir, samples, methods, require_ready=True
+    )
     if not mapping_units:
         sys.exit("No mapping units found. Run step 5 (mapping) first.")
 

@@ -363,6 +363,18 @@ def resolve_results_dir(cfg: Dict[str, Any], run_id: str) -> Path:
     return Path(cfg["project"]["results_dir"]) / run_id
 
 
-def resolve_work_dir(cfg: Dict[str, Any]) -> Path:
-    """Return the work directory."""
-    return Path(cfg["project"]["work_dir"])
+def resolve_work_dir(cfg: Dict[str, Any], run_id: Optional[str] = None) -> Path:
+    """Return the run-scoped work directory.
+
+    The base work root remains ``project.work_dir``. Per-run intermediates are
+    isolated under ``<work_root>/<run_id>`` to avoid cross-run interference.
+    """
+    base = Path(cfg["project"]["work_dir"])
+    rid = run_id or str(cfg.get("_run_id", "")).strip()
+    return base / rid if rid else base
+
+
+def resolve_cache_dir(cfg: Dict[str, Any]) -> Path:
+    """Return shared cache directory for reusable artifacts."""
+    project = cfg.get("project", {})
+    return Path(project.get("cache_dir", "cache"))

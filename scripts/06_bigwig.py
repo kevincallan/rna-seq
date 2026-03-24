@@ -139,7 +139,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     methods = methods_override or get_enabled_methods(cfg)
 
     mapping_units = build_mapping_units_with_bams(results_dir, samples, methods,
-                                                  prefer_filtered=True)
+                                                  prefer_filtered=True, require_ready=True)
 
     selected = read_selected_visualisation(results_dir) if mode == "selected_only" else None
     if mode == "selected_only" and selected is None:
@@ -188,9 +188,11 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         for s in samples:
             bam = unit["sample_to_bam"].get(s.sample_name)
             if bam is None or not bam.exists():
-                logger.warning("BAM not found for %s (%s/%s/%s)",
-                               s.sample_name, method, mapper, mapper_opt)
-                continue
+                raise RuntimeError(
+                    f"Validated BAM missing for {s.sample_name} in "
+                    f"{method}/{mapper}/{mapper_opt}. "
+                    "Mapping summary and BAM outputs are out of sync."
+                )
 
             bw_cpm = bw_dir / f"{s.sample_name}.CPM.MAPQ255.bw"
             logger.info("  %s -> CPM BigWig", s.sample_name)

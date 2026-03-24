@@ -52,6 +52,7 @@ def main(cfg: Dict[str, Any], subset_name: str | None = None) -> None:
     run_id = cfg["_run_id"]
     results_dir = Path(cfg["_results_dir"])
     work_dir = resolve_work_dir(cfg)
+    logger.info("Run %s using work root: %s", run_id, work_dir)
 
     # 1. Parse metadata
     rows = parse_metadata(cfg)

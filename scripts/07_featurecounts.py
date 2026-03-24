@@ -15,9 +15,12 @@ Both backends produce the same output: a clean gene x sample count matrix.
 from __future__ import annotations
 
 import csv
+import hashlib
 import logging
+import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -29,6 +32,7 @@ from src.utils import (
     get_enabled_methods,
     get_run_id,
     load_config,
+    resolve_cache_dir,
     resolve_results_dir,
     resolve_work_dir,
     run_cmd,
@@ -272,30 +276,66 @@ def _prepare_gtf(cfg: Dict[str, Any], results_dir: Path) -> str:
     if not gtf_filter:
         return raw_gtf
 
-    work_dir = Path(cfg.get("_work_dir", "work"))
-    ensure_dirs(work_dir)
-    filtered = work_dir / f"filtered_{gtf_filter}_{Path(raw_gtf).stem.replace('.', '_')}.gtf"
+    cache_root = Path(cfg.get("_cache_dir", resolve_cache_dir(cfg)))
+    cache_dir = cache_root / "filtered_gtf"
+    ensure_dirs(cache_dir)
+    raw_abs = str(Path(raw_gtf).resolve())
+    key = hashlib.sha256(f"{raw_abs}|{gtf_filter}".encode("utf-8")).hexdigest()[:16]
+    filtered = cache_dir / f"{Path(raw_gtf).stem.replace('.', '_')}.{gtf_filter}.{key}.gtf"
     if filtered.exists():
         logger.info("Using cached filtered GTF: %s", filtered)
         return str(filtered)
 
     import gzip
-    import shutil
 
-    logger.info("Pre-filtering GTF for attribute '%s' ...", gtf_filter)
+    lock = filtered.with_suffix(filtered.suffix + ".lock")
+    lock_fd = None
+    lock_timeout_s = 300.0
+    poll_s = 0.2
+    lock_start = time.time()
+    while True:
+        try:
+            lock_fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(lock_fd, str(os.getpid()).encode("utf-8"))
+            os.close(lock_fd)
+            lock_fd = None
+            break
+        except FileExistsError:
+            if filtered.exists():
+                logger.info("Using cached filtered GTF: %s", filtered)
+                return str(filtered)
+            if time.time() - lock_start > lock_timeout_s:
+                raise RuntimeError(
+                    f"Timed out waiting for filtered GTF cache lock: {lock}. "
+                    "Another run may be stuck while building this cache entry."
+                )
+            time.sleep(poll_s)
+
+    logger.info(
+        "Pre-filtering GTF for attribute '%s' into cache %s ...",
+        gtf_filter,
+        filtered,
+    )
     opener = gzip.open if raw_gtf.endswith(".gz") else open
     n_in = 0
     n_out = 0
-    with opener(raw_gtf, "rt", encoding="utf-8", errors="replace") as fin, \
-         open(filtered, "w", encoding="utf-8") as fout:
-        for line in fin:
-            n_in += 1
-            if line.startswith("#") or gtf_filter in line:
-                fout.write(line)
-                n_out += 1
+    tmp = filtered.with_suffix(filtered.suffix + f".tmp.{os.getpid()}")
+    try:
+        with opener(raw_gtf, "rt", encoding="utf-8", errors="replace") as fin, \
+             open(tmp, "w", encoding="utf-8") as fout:
+            for line in fin:
+                n_in += 1
+                if line.startswith("#") or gtf_filter in line:
+                    fout.write(line)
+                    n_out += 1
 
-    logger.info("  GTF filtered: %d -> %d lines (kept rows with '%s')",
-                n_in, n_out, gtf_filter)
+        os.replace(tmp, filtered)
+        logger.info("  GTF filtered: %d -> %d lines (kept rows with '%s')",
+                    n_in, n_out, gtf_filter)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        lock.unlink(missing_ok=True)
     return str(filtered)
 
 
@@ -326,7 +366,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     if use_filtered_bam:
         logger.info("Using filtered BAMs for counting (featurecounts.use_filtered_bam=true)")
     mapping_units = build_mapping_units_with_bams(
-        results_dir, samples, methods, use_filtered_bam=use_filtered_bam
+        results_dir, samples, methods, use_filtered_bam=use_filtered_bam, require_ready=True
     )
 
     for unit in mapping_units:
@@ -349,9 +389,10 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                 bam_files.append(bam)
                 sample_names.append(s.sample_name)
             else:
-                logger.warning(
-                    "BAM not found for trim=%s mapper=%s opt=%s sample=%s",
-                    method, mapper, mapper_opt, s.sample_name,
+                raise RuntimeError(
+                    "Validated BAM missing for counting: "
+                    f"trim={method} mapper={mapper} opt={mapper_opt} sample={s.sample_name}. "
+                    "Mapping outputs may be incomplete or corrupted."
                 )
 
         if not bam_files:

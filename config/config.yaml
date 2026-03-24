@@ -19,7 +19,8 @@
 project:
   name: "GSE48519_5mC_oxidation"   # short project identifier
   results_dir: "results"            # top-level results folder
-  work_dir: "work"                  # intermediate files
+  work_dir: "work"                  # per-run intermediates now live under work/<run_id>
+  cache_dir: "cache"                # shared reusable artifacts (for example filtered GTF cache)
   logs_dir: "logs"                  # per-run log directory
   threads: 6                        # default thread count for tools
 

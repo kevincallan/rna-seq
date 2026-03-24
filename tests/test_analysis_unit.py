@@ -15,6 +15,7 @@ from src.analysis_unit import (
     AnalysisUnit,
     build_full_analysis_units,
     build_mapping_units,
+    build_mapping_units_with_bams,
     infer_analysis_units_from_de_summary,
     read_selected_analysis,
     read_selected_count_comparison,
@@ -108,6 +109,37 @@ class TestBuildMappingUnits:
         units = build_mapping_units(tmp_path, ["none"])
         assert len(units) == 1
         assert units[0] == {"method": "none", "mapper": "star", "mapper_option_set": "default"}
+
+    def test_build_mapping_units_with_bams_requires_index_when_requested(self, tmp_path):
+        class DummySample:
+            def __init__(self, name):
+                self.sample_name = name
+
+        summary = tmp_path / "mapping_summary.tsv"
+        bam = tmp_path / "x.bam"
+        bam.write_bytes(b"bam")
+        with open(summary, "w", newline="") as fh:
+            w = csv.DictWriter(
+                fh,
+                fieldnames=["trim_method", "mapper", "mapper_option_set", "sample", "bam_path"],
+                delimiter="\t",
+            )
+            w.writeheader()
+            w.writerow({
+                "trim_method": "none",
+                "mapper": "star",
+                "mapper_option_set": "default",
+                "sample": "S1",
+                "bam_path": str(bam),
+            })
+
+        with pytest.raises(RuntimeError, match="index missing"):
+            build_mapping_units_with_bams(
+                tmp_path,
+                [DummySample("S1")],
+                ["none"],
+                require_ready=True,
+            )
 
 
 class TestBuildFullAnalysisUnits:
