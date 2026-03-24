@@ -1,13 +1,13 @@
 # =============================================================================
-# RNA-seq Pipeline Configuration -- EXAM TEMPLATE
+# RNA-seq Pipeline Configuration -- TEMPLATE
 # =============================================================================
-# Copy this file and fill in the fields marked # EXAM below.
+# Copy this file and fill in the fields marked # TODO below.
 #
 # Quick setup:
 #   1. Run: ./py scripts/inspect_metadata.py /data/GSEXXXXX/metadata.csv
-#   2. Copy the suggested YAML snippets into the EXAM fields below.
-#   3. Run: ./py scripts/run_pipeline.py --config config/config_exam.yaml \
-#             --dataset GSEXXXXX --species human run --methods none cutadapt
+#   2. Copy the suggested YAML snippets into the TODO fields below.
+#   3. Run: ./py scripts/run_pipeline.py --config config/config_GSEXXXXX.yaml \
+#             --dataset GSEXXXXX --species human run --profile primary
 #
 # See config/config.yaml (mouse example) and config/config_GSE104853.yaml
 # (human example) for fully worked configurations.
@@ -15,7 +15,7 @@
 
 # -- Project metadata ---------------------------------------------------------
 project:
-  name: "EXAM_PROJECT"            # EXAM: short name for the dataset
+  name: "MY_PROJECT"              # TODO: short name for the dataset
   results_dir: "results"
   work_dir: "work"
   logs_dir: "logs"
@@ -23,25 +23,23 @@ project:
 
 # -- Input data ---------------------------------------------------------------
 data:
-  metadata_csv: "/data/GSEXXXXX/metadata.csv"   # EXAM: set via --dataset CLI
-  fastq_dir: "/data/GSEXXXXX"                   # EXAM: set via --dataset CLI
-  layout: "paired"                               # EXAM: check LibraryLayout in CSV
+  metadata_csv: "/data/GSEXXXXX/metadata.csv"   # TODO: set via --dataset CLI
+  fastq_dir: "/data/GSEXXXXX"                   # TODO: set via --dataset CLI
+  layout: "paired"                               # TODO: check LibraryLayout in CSV
 
 # -- Column mapping -----------------------------------------------------------
-# EXAM: paste the column_mapping snippet from inspect_metadata.py output here.
+# TODO: paste the column_mapping snippet from inspect_metadata.py output here.
 column_mapping:
   run_id_col: "Run"
-  condition_cols:                                 # EXAM: which CSV column(s) define conditions
+  condition_cols:                                 # TODO: which CSV column(s) define conditions
     - "CHANGE_ME"
-  condition_map:                                  # EXAM: map raw values to short names
+  condition_map:                                  # TODO: map raw values to short names
     "raw condition value 1": "CondA"
     "raw condition value 2": "CondB"
   replicate_strategy: "sorted_run_id"
 
 # -- Subset filters -----------------------------------------------------------
-# EXAM: filter to RNA-Seq rows; add extra filters if the CSV has mixed assays.
-# To use an allocated subset: run with --dataset <allocated_folder>, or add a
-# filter (e.g. exam: {...}) and set active_subset: "exam".
+# TODO: filter to RNA-Seq rows; add extra filters if the CSV has mixed assays.
 subset_filters:
   default:
     "Assay Type": "RNA-Seq"
@@ -132,10 +130,10 @@ trimming:
 # use_filtered_bam: if true, count from step-5 filtered BAMs (default false).
 featurecounts:
   backend: "featurecounts"
-  strandedness: 0                                # EXAM: check dataset protocol
+  strandedness: 0                                # TODO: check dataset protocol
   use_filtered_bam: false
   feature_type: "exon"
-  attribute: "gene_id"                           # EXAM: "gene_id" or "gene_name"
+  attribute: "gene_id"                           # TODO: "gene_id" or "gene_name"
   gtf_filter: ""                                 # set to "gene_name" if attribute is gene_name
   option_sets:
     default:
@@ -178,17 +176,28 @@ deseq2:
   fdr_threshold: 0.05
   lfc_threshold: 0.0
   method: "pydeseq2"
-  reference_level: "CondA"                       # EXAM: set to the control condition short name
+  reference_level: "CondA"                       # TODO: set to the control condition short name
 
 # -- Contrasts / comparisons --------------------------------------------------
-# EXAM: define your contrast(s). numerator = treatment, denominator = control.
+# TODO: define your contrast(s). numerator = treatment, denominator = control.
 comparisons:
-  - name: "CondB_vs_CondA"                       # EXAM: change to match your conditions
+  - name: "CondB_vs_CondA"                       # TODO: change to match your conditions
     numerator: "CondB"
     denominator: "CondA"
 
 # -- BigWig parameters --------------------------------------------------------
+# -- Selected analysis branch (optional) ------------------------------------
+# If set, this branch is emphasised in the report and used for BigWig.
+# If omitted, the pipeline auto-selects after comparing count option sets.
+# selected_branch:
+#   trim_method: "cutadapt"
+#   mapper: "star"
+#   mapper_option_set: "default"
+#   count_option_set: "strict"
+
 bigwig:
+  enabled: false
+  mode: "selected_only"   # "selected_only" | "all_units"
   normalization: "CPM"
   mapq_filter: 255
   bin_size: 50

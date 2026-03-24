@@ -1,31 +1,18 @@
 # =============================================================================
-# RNA-seq Analysis Pipeline Configuration (exam runbook)
+# RNA-seq Analysis Pipeline Configuration
 # =============================================================================
 # This file is configured for GSE48519 (mouse, Tet1/Tet2 vs WT).
 #
 # Other configs in this directory:
 #   config_GSE104853.yaml  -- human miRNA-125a dataset (worked example)
-#   config_template.yaml   -- blank exam-day template (copy + fill in)
+#   config_template.yaml   -- blank template (copy + fill in)
 #
-# Quick exam-day setup:
+# Quick setup for a new dataset:
 #   1. ./py scripts/inspect_metadata.py /data/GSEXXXXX/metadata.csv
-#   2. cp config/config_template.yaml config/config_exam.yaml
-#   3. Fill in the EXAM-marked fields from the inspector output
-#   4. ./py scripts/run_pipeline.py --config config/config_exam.yaml \
-#        --dataset GSEXXXXX --species human run --methods none cutadapt
-#
-# Keep this as your checklist on exam day:
-#
-# Step 00 (env):     usually no config change; verify tools and Python env.
-# Step 01 (samples): update `data`, `column_mapping`, `subset_filters`, `active_subset`.
-# Step 02 (trim):    update `trimming` (methods + quality/adapters).
-# Step 03-04 (QC):   no major config knobs; outputs reflect step 02 choices.
-# Step 05 (STAR):    update `references` + `star_params` if needed.
-# Step 06 (BigWig):  update `bigwig` mapq/normalization.
-# Step 07 (counts):  update `featurecounts` backend/strandedness/option_sets.
-# Step 08 (filter):  update `filtering.min_max_count`.
-# Step 09 (DE):      update `deseq2` + `comparisons`.
-# Step 10-11 (report): no extra config needed; they summarize prior outputs.
+#   2. cp config/config_template.yaml config/config_GSEXXXXX.yaml
+#   3. Fill in the marked fields from the inspector output
+#   4. ./py scripts/run_pipeline.py --config config/config_GSEXXXXX.yaml \
+#        --dataset GSEXXXXX --species human run --profile primary
 # =============================================================================
 
 # -- Project metadata ---------------------------------------------------------
@@ -66,9 +53,8 @@ column_mapping:
 # Only rows matching ALL key/value pairs are kept.
 # Use "" to match empty fields.
 #
-# To use an exam-allocated subset: run with --dataset <allocated_folder>
-# (that folder has its own metadata.csv). Or add a named filter below and set
-# active_subset to it (e.g. active_subset: "exam").
+# To use a specific subset: add a named filter below and set
+# active_subset to it, or pass --subset <name> on the CLI.
 subset_filters:
   # Day 0 (undifferentiated)
   default:
@@ -233,7 +219,7 @@ filtering:
 # -- DESeq2 parameters --------------------------------------------------------
 deseq2:
   # Step 09:
-  # Keep method=pydeseq2 for exam environment (no R required).
+  # method=pydeseq2 is the default (pure Python, no R required).
   # fdr_threshold controls significance stringency.
   # lfc_threshold can enforce biological effect-size filtering.
   # Enrichment exports are generated automatically per contrast:
@@ -263,11 +249,24 @@ comparisons:
     denominator: "wt"
 
 # -- BigWig parameters --------------------------------------------------------
+# -- Selected analysis branch (optional) ------------------------------------
+# If set, this branch is emphasised in the report and used for BigWig.
+# If omitted, the pipeline auto-selects after comparing count option sets.
+# selected_branch:
+#   trim_method: "cutadapt"
+#   mapper: "star"
+#   mapper_option_set: "default"
+#   count_option_set: "strict"
+
 bigwig:
-  # Step 06:
+  # BigWig generation (now runs after DESeq2 so size factors are available).
+  # enabled: set to false to skip BigWig generation entirely (saves time).
+  # mode: "selected_only" generates only for the selected primary branch;
+  #        "all_units" generates for every mapping unit.
   # mapq_filter=255 keeps uniquely mapped STAR reads only.
-  # Lower (for example 10/20) to include more reads.
+  enabled: false
+  mode: "selected_only"
   normalization: "CPM"
-  mapq_filter: 255       # STAR unique mappers MAPQ=255
+  mapq_filter: 255
   bin_size: 50
-  use_deseq2_sizefactors: true  # also produce DESeq2-scaled BigWigs if available
+  use_deseq2_sizefactors: true

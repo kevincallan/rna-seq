@@ -10,7 +10,6 @@ Produces per-sample BigWig files for each trimming method:
 from __future__ import annotations
 
 import logging
-import csv
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -32,61 +31,7 @@ from src.utils import (
 logger = logging.getLogger(__name__)
 
 
-def build_mapping_units(
-    results_dir: Path,
-    samples: list,
-    methods: List[str],
-    prefer_filtered: bool = False,
-) -> List[Dict[str, Any]]:
-    """Collect mapping units and per-sample BAMs.
-
-    When *prefer_filtered* is True, use the pre-filtered BAM
-    (``filtered_bam_path`` in mapping_summary.tsv) if it exists.
-    """
-    mapping_summary = results_dir / "mapping_summary.tsv"
-    units: Dict[tuple[str, str, str], Dict[str, Any]] = {}
-    if mapping_summary.exists():
-        with open(mapping_summary, encoding="utf-8") as fh:
-            reader = csv.DictReader(fh, delimiter="\t")
-            for row in reader:
-                method = row.get("trim_method") or row.get("method") or ""
-                mapper = row.get("mapper", "star")
-                mapper_opt = row.get("mapper_option_set", "default")
-                sample = row.get("sample", "")
-                bam_path = row.get("bam_path", "")
-                if method not in methods or not sample or not bam_path:
-                    continue
-
-                if prefer_filtered:
-                    filtered = row.get("filtered_bam_path", "")
-                    if filtered and Path(filtered).exists():
-                        bam_path = filtered
-
-                key = (method, mapper, mapper_opt)
-                if key not in units:
-                    units[key] = {
-                        "method": method,
-                        "mapper": mapper,
-                        "mapper_option_set": mapper_opt,
-                        "sample_to_bam": {},
-                    }
-                units[key]["sample_to_bam"][sample] = Path(bam_path)
-    if not units:
-        for method in methods:
-            star_dir = results_dir / method / "star"
-            sample_to_bam: Dict[str, Path] = {}
-            for s in samples:
-                bam = star_dir / f"{s.sample_name}_Aligned.sortedByCoord.out.bam"
-                if bam.exists():
-                    sample_to_bam[s.sample_name] = bam
-            if sample_to_bam:
-                units[(method, "star", "default")] = {
-                    "method": method,
-                    "mapper": "star",
-                    "mapper_option_set": "default",
-                    "sample_to_bam": sample_to_bam,
-                }
-    return [units[k] for k in sorted(units.keys())]
+from src.analysis_unit import build_mapping_units_with_bams, read_selected_analysis
 
 
 def make_bigwig(
@@ -150,25 +95,75 @@ def load_size_factors(path: Path) -> Dict[str, float]:
     return factors
 
 
+def _find_size_factors(
+    results_dir: Path,
+    method: str,
+    mapper: str,
+    mapper_opt: str,
+    count_opt: str,
+) -> Dict[str, float]:
+    """Search for size_factors.tsv in count-option-aware then legacy paths."""
+    from src.analysis_unit import resolve_de_dir
+
+    new_path = resolve_de_dir(results_dir, method, mapper, mapper_opt, count_opt) / "size_factors.tsv"
+    if new_path.exists():
+        return load_size_factors(new_path)
+
+    legacy = results_dir / method / "deseq2" / mapper / mapper_opt / "size_factors.tsv"
+    if legacy.exists():
+        return load_size_factors(legacy)
+
+    return {}
+
+
 def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None:
-    """Execute step 06."""
+    """Execute BigWig generation."""
     logger.info("=" * 60)
-    logger.info("STEP 06: BigWig generation")
+    logger.info("STEP: BigWig generation")
     logger.info("=" * 60)
 
     results_dir = Path(cfg["_results_dir"])
     bw_cfg = cfg.get("bigwig", {})
 
+    if not bw_cfg.get("enabled", True):
+        logger.info("BigWig generation disabled in config (bigwig.enabled=false). Skipping.")
+        return
+
+    mode = bw_cfg.get("mode", "all_units")
     samples_tsv = Path(cfg.get("_samples_tsv", results_dir / "samples.tsv"))
     samples = read_samples_tsv(samples_tsv)
     methods = methods_override or get_enabled_methods(cfg)
 
-    mapping_units = build_mapping_units(results_dir, samples, methods,
-                                        prefer_filtered=True)
+    mapping_units = build_mapping_units_with_bams(results_dir, samples, methods,
+                                                  prefer_filtered=True)
+
+    selected = read_selected_analysis(results_dir) if mode == "selected_only" else None
+    if mode == "selected_only" and selected is None:
+        logger.warning(
+            "BigWig mode is 'selected_only' but no selected_analysis.tsv found. "
+            "Falling back to all_units mode."
+        )
+        mode = "all_units"
+
+    # Determine which count_opt to use for size factors
+    option_sets = cfg.get("featurecounts", {}).get("option_sets", {"default": {}})
+    sf_count_opt = list(option_sets.keys())[0] if option_sets else "default"
+    if selected:
+        sf_count_opt = selected.count_option_set
+
     for unit in mapping_units:
         method = unit["method"]
         mapper = unit["mapper"]
         mapper_opt = unit["mapper_option_set"]
+
+        if mode == "selected_only" and selected is not None:
+            if (method, mapper, mapper_opt) != selected.mapping_key:
+                logger.info(
+                    "Skipping BigWig for %s/%s/%s (not the selected branch)",
+                    method, mapper, mapper_opt,
+                )
+                continue
+
         logger.info(
             "--- BigWigs for trim=%s mapper=%s mapper_option=%s ---",
             method, mapper, mapper_opt,
@@ -176,10 +171,12 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         bw_dir = results_dir / method / "bigwig" / mapper / mapper_opt
         ensure_dirs(bw_dir)
 
-        # Try to load DESeq2 size factors for this mapping unit.
-        sf_path = results_dir / method / "deseq2" / mapper / mapper_opt / "size_factors.tsv"
-        size_factors = load_size_factors(sf_path)
-        use_sf = bw_cfg.get("use_deseq2_sizefactors", True) and bool(size_factors)
+        size_factors: Dict[str, float] = {}
+        if bw_cfg.get("use_deseq2_sizefactors", True):
+            size_factors = _find_size_factors(
+                results_dir, method, mapper, mapper_opt, sf_count_opt
+            )
+        use_sf = bool(size_factors)
 
         for s in samples:
             bam = unit["sample_to_bam"].get(s.sample_name)
@@ -188,22 +185,19 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                                s.sample_name, method, mapper, mapper_opt)
                 continue
 
-            # CPM normalised BigWig
             bw_cpm = bw_dir / f"{s.sample_name}.CPM.MAPQ255.bw"
             logger.info("  %s -> CPM BigWig", s.sample_name)
             make_bigwig(bam, bw_cpm, cfg)
 
-            # DESeq2 size-factor scaled BigWig
             if use_sf and s.sample_name in size_factors:
                 sf = size_factors[s.sample_name]
-                # bamCoverage scaleFactor = 1/sf (inverse of DESeq2 factor)
                 inv_sf = 1.0 / sf if sf != 0 else 1.0
                 bw_deseq = bw_dir / f"{s.sample_name}.DESeq2scaled.MAPQ255.bw"
                 logger.info("  %s -> DESeq2-scaled BigWig (sf=%.4f, 1/sf=%.4f)",
                             s.sample_name, sf, inv_sf)
                 make_bigwig(bam, bw_deseq, cfg, scale_factor=inv_sf)
 
-    logger.info("STEP 06 complete.\n")
+    logger.info("BigWig generation complete.\n")
 
 
 if __name__ == "__main__":

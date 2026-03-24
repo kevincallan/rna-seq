@@ -10,7 +10,6 @@ samples -- rule of thumb ~2 reads per sample).
 from __future__ import annotations
 
 import logging
-import csv
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -31,27 +30,7 @@ from src.utils import (
 logger = logging.getLogger(__name__)
 
 
-def build_mapping_units(results_dir: Path, methods: List[str]) -> List[Dict[str, str]]:
-    """Infer mapping units from mapping_summary.tsv or use STAR legacy fallback."""
-    mapping_summary = results_dir / "mapping_summary.tsv"
-    units: set[tuple[str, str, str]] = set()
-    if mapping_summary.exists():
-        with open(mapping_summary, encoding="utf-8") as fh:
-            reader = csv.DictReader(fh, delimiter="\t")
-            for row in reader:
-                method = row.get("method") or row.get("trim_method") or ""
-                if method not in methods:
-                    continue
-                mapper = row.get("mapper", "star")
-                mapper_opt = row.get("mapper_option_set", "default")
-                units.add((method, mapper, mapper_opt))
-    if not units:
-        for method in methods:
-            units.add((method, "star", "default"))
-    return [
-        {"method": m, "mapper": p, "mapper_option_set": o}
-        for (m, p, o) in sorted(units)
-    ]
+from src.analysis_unit import build_mapping_units
 
 
 def filter_matrix(

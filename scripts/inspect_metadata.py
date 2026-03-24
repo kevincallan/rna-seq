@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Metadata CSV Inspector -- exam-day helper.
+Metadata CSV Inspector.
 
 Reads any SRA metadata CSV and prints:
   - Column names
@@ -179,10 +179,10 @@ def inspect(csv_path: str) -> None:
     print("Suggested pipeline command")
     print(f"{'=' * 60}")
     print(f"\n./py scripts/run_pipeline.py \\")
-    print(f"  --config config/config_exam.yaml \\")
+    print(f"  --config config/config_{dataset_name}.yaml \\")
     print(f"  --dataset {dataset_name} \\")
     print(f"  --species {species_flag} \\")
-    print(f"  run --methods none cutadapt")
+    print(f"  run --profile primary --methods none cutadapt")
     print()
 
 

@@ -195,7 +195,7 @@ def run_pydeseq2(
         len(sig_genes), len(up_genes), len(down_genes), out_dir,
     )
 
-    # --- Top-20 DE gene table (exam report ready) ----------------------------
+    # --- Top-20 DE gene table ---------------------------------------------------
     top20 = results.head(20)[["baseMean", "log2FoldChange", "padj"]].copy()
     top20.to_csv(out_dir / "top20_de_genes.tsv", sep="\t")
     logger.info("  Top-20 DE gene table -> %s", out_dir / "top20_de_genes.tsv")
@@ -438,27 +438,7 @@ def count_degs(results_path: Path, fdr: float = 0.05) -> Dict[str, int]:
     }
 
 
-def build_mapping_units(results_dir: Path, methods: List[str]) -> List[Dict[str, str]]:
-    """Infer mapping units from mapping_summary.tsv or use STAR legacy fallback."""
-    units: set[tuple[str, str, str]] = set()
-    mapping_summary = results_dir / "mapping_summary.tsv"
-    if mapping_summary.exists():
-        with open(mapping_summary, encoding="utf-8") as fh:
-            reader = csv.DictReader(fh, delimiter="\t")
-            for row in reader:
-                method = row.get("method") or row.get("trim_method") or ""
-                if method not in methods:
-                    continue
-                mapper = row.get("mapper", "star")
-                mapper_opt = row.get("mapper_option_set", "default")
-                units.add((method, mapper, mapper_opt))
-    if not units:
-        for method in methods:
-            units.add((method, "star", "default"))
-    return [
-        {"method": m, "mapper": p, "mapper_option_set": o}
-        for (m, p, o) in sorted(units)
-    ]
+from src.analysis_unit import build_mapping_units, resolve_count_matrix, resolve_de_dir
 
 
 # =========================================================================
@@ -484,9 +464,6 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     methods = methods_override or get_enabled_methods(cfg)
     option_sets = cfg["featurecounts"].get("option_sets", {"default": {}})
 
-    # Use the first option set for DE by default (typically "default")
-    primary_opt = list(option_sets.keys())[0]
-
     all_de_stats: List[Dict[str, Any]] = []
 
     mapping_units = build_mapping_units(results_dir, methods)
@@ -494,69 +471,66 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         method = unit["method"]
         mapper = unit["mapper"]
         mapper_opt = unit["mapper_option_set"]
-        logger.info(
-            "--- DE for trim=%s mapper=%s mapper_option=%s ---",
-            method, mapper, mapper_opt,
-        )
-        fc_dir = results_dir / method / "featurecounts" / mapper / mapper_opt
-        de_dir = results_dir / method / "deseq2" / mapper / mapper_opt
-        ensure_dirs(de_dir)
 
-        # Count matrix
-        count_matrix = fc_dir / f"clean_matrix_{primary_opt}.tsv"
-        if not count_matrix.exists():
-            # Legacy fallback
-            legacy_count_matrix = results_dir / method / "featurecounts" / f"clean_matrix_{primary_opt}.tsv"
-            if legacy_count_matrix.exists():
-                count_matrix = legacy_count_matrix
-            else:
-                logger.error("Count matrix not found: %s", count_matrix)
+        for opt_name in option_sets:
+            logger.info(
+                "--- DE for trim=%s mapper=%s mapper_option=%s count_option=%s ---",
+                method, mapper, mapper_opt, opt_name,
+            )
+            de_dir = resolve_de_dir(results_dir, method, mapper, mapper_opt, opt_name)
+            ensure_dirs(de_dir)
+
+            count_matrix_path = resolve_count_matrix(
+                results_dir, method, mapper, mapper_opt, opt_name
+            )
+            if count_matrix_path is None:
+                logger.error(
+                    "Count matrix not found for %s/%s/%s/%s -- skipping",
+                    method, mapper, mapper_opt, opt_name,
+                )
                 continue
 
-        # Write sample description for R backends
-        sample_desc = de_dir / "sample_description.txt"
-        write_sample_description(samples, sample_desc)
+            sample_desc = de_dir / "sample_description.txt"
+            write_sample_description(samples, sample_desc)
 
-        if method_backend == "wrapper":
-            # DESeq2_wrapper runs a single default contrast
-            logger.info("  Running DESeq2_wrapper...")
-            run_deseq2_wrapper(count_matrix, sample_desc, de_dir, cfg)
-            de_all = de_dir / "DESeq2.de_all.tsv"
-            if de_all.exists():
-                stats = count_degs(de_all, fdr)
-                stats["trim_method"] = method
-                stats["mapper"] = mapper
-                stats["mapper_option_set"] = mapper_opt
-                stats["count_option_set"] = primary_opt
-                stats["contrast"] = "auto"
-                all_de_stats.append(stats)
+            if method_backend == "wrapper":
+                logger.info("  Running DESeq2_wrapper...")
+                run_deseq2_wrapper(count_matrix_path, sample_desc, de_dir, cfg)
+                de_all = de_dir / "DESeq2.de_all.tsv"
+                if de_all.exists():
+                    stats = count_degs(de_all, fdr)
+                    stats["trim_method"] = method
+                    stats["mapper"] = mapper
+                    stats["mapper_option_set"] = mapper_opt
+                    stats["count_option_set"] = opt_name
+                    stats["contrast"] = "auto"
+                    all_de_stats.append(stats)
 
-        elif method_backend == "pydeseq2":
-            # Pure Python -- no R required
-            for contrast in comparisons:
-                cname = contrast["name"]
-                num = contrast["numerator"]
-                den = contrast["denominator"]
-                contrast_dir = de_dir / cname
-                logger.info("  Contrast: %s (%s vs %s)", cname, num, den)
-                run_pydeseq2(
-                    count_matrix, samples,
-                    cname, num, den, contrast_dir, cfg,
+            elif method_backend == "pydeseq2":
+                for contrast in comparisons:
+                    cname = contrast["name"]
+                    num = contrast["numerator"]
+                    den = contrast["denominator"]
+                    contrast_dir = de_dir / cname
+                    logger.info("  Contrast: %s (%s vs %s)", cname, num, den)
+                    run_pydeseq2(
+                        count_matrix_path, samples,
+                        cname, num, den, contrast_dir, cfg,
+                    )
+                    de_all = contrast_dir / "de_all.tsv"
+                    stats = count_degs(de_all, fdr)
+                    stats["trim_method"] = method
+                    stats["mapper"] = mapper
+                    stats["mapper_option_set"] = mapper_opt
+                    stats["count_option_set"] = opt_name
+                    stats["contrast"] = cname
+                    all_de_stats.append(stats)
+
+            else:
+                raise ValueError(
+                    f"Unknown deseq2.method: '{method_backend}'. "
+                    "Use 'pydeseq2' or 'wrapper'."
                 )
-                de_all = contrast_dir / "de_all.tsv"
-                stats = count_degs(de_all, fdr)
-                stats["trim_method"] = method
-                stats["mapper"] = mapper
-                stats["mapper_option_set"] = mapper_opt
-                stats["count_option_set"] = primary_opt
-                stats["contrast"] = cname
-                all_de_stats.append(stats)
-
-        else:
-            raise ValueError(
-                f"Unknown deseq2.method: '{method_backend}'. "
-                "Use 'pydeseq2' or 'wrapper'."
-            )
 
     # Write DE summary
     de_summary_path = results_dir / "de_summary.tsv"

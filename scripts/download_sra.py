@@ -4,7 +4,7 @@ Optional helper -- Download FASTQs from SRA.
 
 Downloads FASTQ files for a list of SRA Run IDs using ``fasterq-dump``
 (from the SRA Toolkit).  This is optional and may not be available on
-exam machines without internet access.
+machines without internet access.
 
 Usage:
     ./py scripts/download_sra.py --ids SRR925874 SRR925875 --outdir /data/fastqs

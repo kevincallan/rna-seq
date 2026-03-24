@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Step 10 -- Compare trimming methods.
+Step 10 -- Compare methods and parameter effects.
 
 Produces a consolidated comparison report across all enabled trimming
-methods.  Covers:
+methods and featureCounts option sets.  Covers:
   - Mapping rate comparison
   - Assigned reads in featureCounts
-  - Correlation of normalised counts between methods
-  - DEG overlap between methods (per contrast)
+  - Correlation of normalised counts between analysis units
+  - DEG overlap between analysis units (per contrast)
   - Genes with method-sensitive significance (padj flips)
+  - DE threshold sensitivity
 """
 
 from __future__ import annotations
@@ -31,6 +32,17 @@ from src.utils import (
     resolve_work_dir,
     setup_logging,
 )
+from src.analysis_unit import (
+    AnalysisUnit,
+    build_full_analysis_units,
+    build_mapping_units,
+    infer_analysis_units_from_de_summary,
+    mapping_unit_label,
+    resolve_de_dir,
+    resolve_de_base_legacy,
+    unit_label,
+    write_selected_analysis,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,77 +63,46 @@ def read_tsv(path: Path) -> List[Dict[str, str]]:
     return rows
 
 
-def unit_label(unit: Dict[str, str]) -> str:
-    """Human-readable label for a trim/mapping analysis unit."""
-    method = unit.get("method", "")
-    mapper = unit.get("mapper", "star")
-    mapper_opt = unit.get("mapper_option_set", "default")
-    return f"{method}/{mapper}/{mapper_opt}"
+def _resolve_de_all(results_dir: Path, au: AnalysisUnit, contrast: str) -> Optional[Path]:
+    """Find de_all.tsv for an analysis unit + contrast.
 
+    Checks the new count-option-aware path first, then legacy paths.
+    """
+    de_dir = resolve_de_dir(
+        results_dir, au.method, au.mapper,
+        au.mapper_option_set, au.count_option_set,
+    )
+    de_path = de_dir / contrast / "de_all.tsv"
+    if de_path.exists():
+        return de_path
 
-def resolve_de_base(results_dir: Path, unit: Dict[str, str]) -> Path:
-    """Resolve DE output directory for a unit, supporting legacy layout."""
-    method = unit.get("method", "")
-    mapper = unit.get("mapper", "star")
-    mapper_opt = unit.get("mapper_option_set", "default")
-    nested = results_dir / method / "deseq2" / mapper / mapper_opt
-    if nested.exists():
-        return nested
-    return results_dir / method / "deseq2"
+    legacy_base = resolve_de_base_legacy(
+        results_dir, au.method, au.mapper, au.mapper_option_set,
+    )
+    legacy_path = legacy_base / contrast / "de_all.tsv"
+    if legacy_path.exists():
+        return legacy_path
+    wrapper_path = legacy_base / "DESeq2.de_all.tsv"
+    if wrapper_path.exists():
+        return wrapper_path
 
-
-def build_analysis_units(results_dir: Path, methods: List[str]) -> List[Dict[str, str]]:
-    """Build analysis units from DE or mapping summaries."""
-    units: set[tuple[str, str, str]] = set()
-    de_summary = results_dir / "de_summary.tsv"
-    if de_summary.exists():
-        for row in read_tsv(de_summary):
-            method = row.get("method") or row.get("trim_method") or ""
-            if method not in methods:
-                continue
-            mapper = row.get("mapper", "star")
-            mapper_opt = row.get("mapper_option_set", "default")
-            units.add((method, mapper, mapper_opt))
-
-    if not units:
-        mapping_summary = results_dir / "mapping_summary.tsv"
-        if mapping_summary.exists():
-            for row in read_tsv(mapping_summary):
-                method = row.get("method") or row.get("trim_method") or ""
-                if method not in methods:
-                    continue
-                mapper = row.get("mapper", "star")
-                mapper_opt = row.get("mapper_option_set", "default")
-                units.add((method, mapper, mapper_opt))
-
-    if not units:
-        for method in methods:
-            units.add((method, "star", "default"))
-
-    return [
-        {"method": m, "mapper": p, "mapper_option_set": o}
-        for (m, p, o) in sorted(units)
-    ]
+    return None
 
 
 def load_de_genes(
     results_dir: Path,
-    unit: Dict[str, str],
+    au: AnalysisUnit,
     contrast: str,
     fdr: float,
 ) -> Set[str]:
     """Load set of significant gene IDs from a DESeq2 result."""
-    de_base = resolve_de_base(results_dir, unit)
-    de_path = de_base / contrast / "de_all.tsv"
-    if not de_path.exists():
-        de_path = de_base / "DESeq2.de_all.tsv"
-    if not de_path.exists():
+    de_path = _resolve_de_all(results_dir, au, contrast)
+    if de_path is None:
         return set()
 
     genes: Set[str] = set()
     with open(de_path, encoding="utf-8") as fh:
         header = fh.readline().strip().split("\t")
-        # Find padj column
         padj_idx = -1
         for i, h in enumerate(header):
             if "padj" in h.lower():
@@ -135,7 +116,6 @@ def load_de_genes(
             try:
                 padj = float(parts[padj_idx])
                 if padj < fdr:
-                    # Gene ID is first column (or row name)
                     genes.add(parts[0])
             except (ValueError, IndexError):
                 continue
@@ -144,15 +124,12 @@ def load_de_genes(
 
 def load_padj_dict(
     results_dir: Path,
-    unit: Dict[str, str],
+    au: AnalysisUnit,
     contrast: str,
 ) -> Dict[str, float]:
     """Load gene -> padj mapping from DE results."""
-    de_base = resolve_de_base(results_dir, unit)
-    de_path = de_base / contrast / "de_all.tsv"
-    if not de_path.exists():
-        de_path = de_base / "DESeq2.de_all.tsv"
-    if not de_path.exists():
+    de_path = _resolve_de_all(results_dir, au, contrast)
+    if de_path is None:
         return {}
 
     padj_map: Dict[str, float] = {}
@@ -177,12 +154,20 @@ def load_padj_dict(
 
 def load_norm_counts(
     results_dir: Path,
-    unit: Dict[str, str],
+    au: AnalysisUnit,
     contrast: str,
 ) -> Dict[str, List[float]]:
     """Load normalised counts from DESeq2 output."""
-    de_base = resolve_de_base(results_dir, unit)
-    nc_path = de_base / contrast / "normalized_counts.tsv"
+    de_dir = resolve_de_dir(
+        results_dir, au.method, au.mapper,
+        au.mapper_option_set, au.count_option_set,
+    )
+    nc_path = de_dir / contrast / "normalized_counts.tsv"
+    if not nc_path.exists():
+        legacy_base = resolve_de_base_legacy(
+            results_dir, au.method, au.mapper, au.mapper_option_set,
+        )
+        nc_path = legacy_base / contrast / "normalized_counts.tsv"
     if not nc_path.exists():
         return {}
 
@@ -233,7 +218,8 @@ def summarize_featurecounts_options(
 ) -> Dict[Tuple[str, str, str, str], Dict[str, float]]:
     """Aggregate assigned-read stats by (method, mapper, mapper_option_set, option_set)."""
     agg: Dict[Tuple[str, str, str, str], Dict[str, float]] = defaultdict(
-        lambda: {"n": 0.0, "sum": 0.0, "min": float("inf"), "max": float("-inf")}
+        lambda: {"n": 0.0, "sum": 0.0, "min": float("inf"), "max": float("-inf"),
+                 "total_sum": 0.0}
     )
     for row in fc_rows:
         method = row.get("trim_method", row.get("method", ""))
@@ -244,12 +230,24 @@ def summarize_featurecounts_options(
             val = float(row.get("Assigned", row.get("assigned_reads", "0")))
         except ValueError:
             continue
+        # Compute total reads for assigned % (sum all numeric status cols)
+        total = 0.0
+        for k, v in row.items():
+            if k in ("trim_method", "method", "mapper", "mapper_option_set",
+                      "option_set", "sample", "Assigned_pct"):
+                continue
+            try:
+                total += float(v)
+            except (ValueError, TypeError):
+                continue
+
         key = (method, mapper, mapper_opt, opt)
         a = agg[key]
         a["n"] += 1
         a["sum"] += val
         a["min"] = min(a["min"], val)
         a["max"] = max(a["max"], val)
+        a["total_sum"] += total
     return agg
 
 
@@ -304,6 +302,96 @@ def count_degs_at_thresholds(
 
 
 # ---------------------------------------------------------------------------
+# Selected-branch logic
+# ---------------------------------------------------------------------------
+
+def _select_primary_branch(
+    cfg: Dict[str, Any],
+    results_dir: Path,
+    units: List[AnalysisUnit],
+    fc_data: List[Dict[str, str]],
+    comparisons: List[Dict[str, str]],
+    fdr: float,
+) -> Optional[AnalysisUnit]:
+    """Select the primary analysis branch and write selected_analysis.tsv.
+
+    Selection rules:
+    1. If config has ``selected_branch``, use that.
+    2. Otherwise, among units with valid DE outputs and non-multimapper
+       count options, pick the one with the highest mean assigned-read %.
+    3. Tie-break: prefer 'default' mapper_option_set, then 'strict'.
+    """
+    sb = cfg.get("selected_branch")
+    if sb:
+        manual = AnalysisUnit(
+            method=sb.get("trim_method", ""),
+            mapper=sb.get("mapper", "star"),
+            mapper_option_set=sb.get("mapper_option_set", "default"),
+            count_option_set=sb.get("count_option_set", "default"),
+        )
+        write_selected_analysis(results_dir, manual, reason="manual_config")
+        return manual
+
+    if not units:
+        return None
+
+    option_sets = cfg.get("featurecounts", {}).get("option_sets", {})
+    multimapper_opts = {
+        name for name, params in option_sets.items()
+        if isinstance(params, dict) and params.get("M", False)
+    }
+
+    # Build assigned-% aggregates from fc_data
+    assigned_pct: Dict[Tuple[str, str, str, str], float] = {}
+    if fc_data:
+        option_stats = summarize_featurecounts_options(fc_data)
+        for (method, mapper, mapper_opt, opt), stats in option_stats.items():
+            pct = (100.0 * stats["sum"] / stats["total_sum"]
+                   if stats["total_sum"] > 0 else 0.0)
+            assigned_pct[(method, mapper, mapper_opt, opt)] = pct
+
+    # Filter to units with valid DE output and non-multimapper
+    candidates: List[Tuple[float, int, AnalysisUnit]] = []
+    for au in units:
+        if au.count_option_set in multimapper_opts:
+            continue
+
+        has_de = False
+        for contrast in comparisons:
+            de_path = _resolve_de_all(results_dir, au, contrast["name"])
+            if de_path is not None and de_path.exists():
+                has_de = True
+                break
+        if not has_de:
+            continue
+
+        pct = assigned_pct.get(
+            (au.method, au.mapper, au.mapper_option_set, au.count_option_set), 0.0
+        )
+        # Tie-break ordering: prefer "default" mapper_opt then "strict" count_opt
+        tiebreak = 0
+        if au.mapper_option_set == "default":
+            tiebreak += 2
+        if au.count_option_set == "strict":
+            tiebreak += 1
+
+        candidates.append((pct, tiebreak, au))
+
+    if not candidates:
+        # Fall back to first unit
+        write_selected_analysis(results_dir, units[0], reason="fallback_first_unit")
+        return units[0]
+
+    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    best = candidates[0][2]
+    write_selected_analysis(
+        results_dir, best,
+        reason="highest_assigned_pct_with_valid_de",
+    )
+    return best
+
+
+# ---------------------------------------------------------------------------
 # Main comparison logic
 # ---------------------------------------------------------------------------
 
@@ -317,15 +405,19 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     methods = methods_override or get_enabled_methods(cfg)
     comparisons = cfg.get("comparisons", [])
     fdr = cfg.get("deseq2", {}).get("fdr_threshold", 0.05)
-    units = build_analysis_units(results_dir, methods)
+    option_sets = cfg["featurecounts"].get("option_sets", {"default": {}})
+
+    units = infer_analysis_units_from_de_summary(results_dir, methods)
+    if not units:
+        units = build_full_analysis_units(results_dir, methods, option_sets)
 
     report_dir = results_dir / "reports"
     ensure_dirs(report_dir)
 
     comparison_lines: List[str] = []
-    comparison_lines.append("# Trimming Method Comparison\n")
+    comparison_lines.append("# Method and Parameter Comparison\n")
     comparison_lines.append(
-        f"Analysis units: {', '.join(unit_label(u) for u in units)}\n"
+        f"Analysis units: {', '.join(au.label for au in units)}\n"
     )
 
     # === 1. Mapping rate comparison =========================================
@@ -406,18 +498,23 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     if fc_data:
         option_stats = summarize_featurecounts_options(fc_data)
         comparison_lines.append(
-            "| Trim Method | Mapper | Mapper Option | Count Option Set | N samples | Mean assigned reads | Min | Max |"
+            "| Trim Method | Mapper | Mapper Option | Count Option Set | N samples "
+            "| Mean assigned reads | Mean assigned % | Min | Max |"
         )
         comparison_lines.append(
-            "|-------------|--------|---------------|------------------|-----------|---------------------|-----|-----|"
+            "|-------------|--------|---------------|------------------|----------"
+            "|---------------------|-----------------|-----|-----|"
         )
         for (method, mapper, mapper_opt, opt), stats in sorted(option_stats.items()):
             n = int(stats["n"])
             mean = stats["sum"] / stats["n"] if stats["n"] else 0.0
+            mean_pct = (100.0 * stats["sum"] / stats["total_sum"]
+                        if stats["total_sum"] > 0 else 0.0)
             min_v = int(stats["min"]) if n else 0
             max_v = int(stats["max"]) if n else 0
             comparison_lines.append(
-                f"| {method} | {mapper} | {mapper_opt} | {opt} | {n} | {mean:.1f} | {min_v} | {max_v} |"
+                f"| {method} | {mapper} | {mapper_opt} | {opt} | {n} "
+                f"| {mean:.1f} | {mean_pct:.1f}% | {min_v} | {max_v} |"
             )
 
         # Delta versus default per trim+mapper+mapper_option
@@ -450,11 +547,10 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     if len(units) >= 2 and comparisons:
         contrast = comparisons[0]["name"]
         norm_counts_by_unit: Dict[str, Dict[str, List[float]]] = {}
-        for unit in units:
-            label = unit_label(unit)
-            nc = load_norm_counts(results_dir, unit, contrast)
+        for au in units:
+            nc = load_norm_counts(results_dir, au, contrast)
             if nc:
-                norm_counts_by_unit[label] = nc
+                norm_counts_by_unit[au.label] = nc
 
         if len(norm_counts_by_unit) >= 2:
             comparison_lines.append(f"*(Contrast: {contrast})*\n")
@@ -483,13 +579,11 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         comparison_lines.append(f"\n### Contrast: {cname}\n")
 
         deg_sets: Dict[str, Set[str]] = {}
-        for unit in units:
-            label = unit_label(unit)
-            degs = load_de_genes(results_dir, unit, cname, fdr)
-            deg_sets[label] = degs
-            comparison_lines.append(f"- **{label}**: {len(degs)} DEGs (FDR < {fdr})")
+        for au in units:
+            degs = load_de_genes(results_dir, au, cname, fdr)
+            deg_sets[au.label] = degs
+            comparison_lines.append(f"- **{au.label}**: {len(degs)} DEGs (FDR < {fdr})")
 
-        # Pairwise overlaps
         if len(units) >= 2:
             comparison_lines.append("\n| Unit A | Unit B | A only | Shared | B only |")
             comparison_lines.append("|----------|----------|--------|--------|--------|")
@@ -517,16 +611,14 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         comparison_lines.append(f"\n### {cname}\n")
 
         padj_maps: Dict[str, Dict[str, float]] = {}
-        for unit in units:
-            label = unit_label(unit)
-            padj_maps[label] = load_padj_dict(results_dir, unit, cname)
+        for au in units:
+            padj_maps[au.label] = load_padj_dict(results_dir, au, cname)
 
         if len(units) < 2:
             comparison_lines.append("*(Need >= 2 analysis units)*\n")
             continue
 
-        # Find genes that flip significance between any pair
-        all_genes = set()
+        all_genes: Set[str] = set()
         for pm in padj_maps.values():
             all_genes.update(pm.keys())
 
@@ -555,7 +647,6 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
             )
             comparison_lines.append("| Gene | Method A | padj A | Method B | padj B |")
             comparison_lines.append("|------|----------|--------|----------|--------|")
-            # Show first 50
             for entry in flipped[:50]:
                 comparison_lines.append(
                     f"| {entry['gene']} | {entry['method_a']} | {entry['padj_a']} "
@@ -574,24 +665,23 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     )
     fdr_values = [0.01, 0.05, 0.1]
     comparison_lines.append(
-        "| Trim Method | Mapper | Mapper Option | Contrast | FDR<0.01 | FDR<0.05 | FDR<0.1 | FDR<0.05 & |log2FC|>=1 |"
+        "| Trim Method | Mapper | Mapper Opt | Count Opt | Contrast "
+        "| FDR<0.01 | FDR<0.05 | FDR<0.1 | FDR<0.05 & |log2FC|>=1 |"
     )
     comparison_lines.append(
-        "|-------------|--------|---------------|----------|----------|----------|---------|-----------------------|"
+        "|-------------|--------|-----------|-----------|----------"
+        "|----------|----------|---------|-----------------------|"
     )
-    for unit in units:
-        method = unit.get("method", "")
-        mapper = unit.get("mapper", "star")
-        mapper_opt = unit.get("mapper_option_set", "default")
-        de_base = resolve_de_base(results_dir, unit)
+    for au in units:
         for contrast in comparisons:
             cname = contrast["name"]
-            de_path = de_base / cname / "de_all.tsv"
-            if not de_path.exists():
-                de_path = de_base / "DESeq2.de_all.tsv"
+            de_path = _resolve_de_all(results_dir, au, cname)
+            if de_path is None:
+                de_path = Path("/dev/null")  # count_degs_at_thresholds handles missing
             stats = count_degs_at_thresholds(de_path, fdr_values)
             comparison_lines.append(
-                f"| {method} | {mapper} | {mapper_opt} | {cname} | {stats['fdr_0.01']} | "
+                f"| {au.method} | {au.mapper} | {au.mapper_option_set} "
+                f"| {au.count_option_set} | {cname} | {stats['fdr_0.01']} | "
                 f"{stats['fdr_0.05']} | {stats['fdr_0.1']} | "
                 f"{stats['fdr_0.05_lfc1']} |"
             )
@@ -600,6 +690,13 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     report_path = report_dir / "method_comparison.md"
     report_path.write_text("\n".join(comparison_lines), encoding="utf-8")
     logger.info("Method comparison report -> %s", report_path)
+
+    # === 7. Select primary analysis branch ==================================
+    selected = _select_primary_branch(cfg, results_dir, units, fc_data, comparisons, fdr)
+    if selected:
+        logger.info("Selected primary branch: %s", selected.label)
+    else:
+        logger.warning("Could not determine a selected primary branch.")
 
     logger.info("STEP 10 complete.\n")
 

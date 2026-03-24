@@ -27,6 +27,13 @@ from src.utils import (
     resolve_work_dir,
     setup_logging,
 )
+from src.analysis_unit import (
+    AnalysisUnit,
+    infer_analysis_units_from_de_summary,
+    read_selected_analysis,
+    resolve_de_dir,
+    resolve_de_base_legacy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +42,6 @@ def _infer_methods_from_outputs(results_dir: Path, cfg: Dict[str, Any]) -> List[
     """Infer methods that actually have outputs for this run."""
     methods: set[str] = set()
 
-    # Prefer methods observed in summaries
     for summary in ["mapping_summary.tsv", "featurecounts_summary.tsv", "de_summary.tsv"]:
         p = results_dir / summary
         if not p.exists():
@@ -47,7 +53,6 @@ def _infer_methods_from_outputs(results_dir: Path, cfg: Dict[str, Any]) -> List[
                 if m:
                     methods.add(m)
 
-    # Fallback: detect method dirs in results tree
     if not methods:
         for p in results_dir.iterdir():
             if not p.is_dir():
@@ -57,59 +62,30 @@ def _infer_methods_from_outputs(results_dir: Path, cfg: Dict[str, Any]) -> List[
             if (p / "star").exists() or (p / "deseq2").exists() or (p / "qc").exists():
                 methods.add(p.name)
 
-    # Final fallback: config-enabled methods
     if not methods:
         methods.update(get_enabled_methods(cfg))
 
     return sorted(methods)
 
 
-def _infer_analysis_units(results_dir: Path, methods: List[str]) -> List[Dict[str, str]]:
-    """Infer trim/mapping analysis units from DE or mapping summaries."""
-    units: set[tuple[str, str, str]] = set()
-    de_summary = results_dir / "de_summary.tsv"
-    if de_summary.exists():
-        with open(de_summary, encoding="utf-8") as fh:
-            reader = csv.DictReader(fh, delimiter="\t")
-            for row in reader:
-                method = row.get("method") or row.get("trim_method") or ""
-                if method not in methods:
-                    continue
-                mapper = row.get("mapper", "star")
-                mapper_opt = row.get("mapper_option_set", "default")
-                units.add((method, mapper, mapper_opt))
+def _resolve_de_all_for_unit(results_dir: Path, au: AnalysisUnit, contrast: str) -> Path:
+    """Find de_all.tsv for an analysis unit, checking new then legacy paths."""
+    de_dir = resolve_de_dir(
+        results_dir, au.method, au.mapper,
+        au.mapper_option_set, au.count_option_set,
+    )
+    de_path = de_dir / contrast / "de_all.tsv"
+    if de_path.exists():
+        return de_path
 
-    if not units:
-        mapping_summary = results_dir / "mapping_summary.tsv"
-        if mapping_summary.exists():
-            with open(mapping_summary, encoding="utf-8") as fh:
-                reader = csv.DictReader(fh, delimiter="\t")
-                for row in reader:
-                    method = row.get("method") or row.get("trim_method") or ""
-                    if method not in methods:
-                        continue
-                    mapper = row.get("mapper", "star")
-                    mapper_opt = row.get("mapper_option_set", "default")
-                    units.add((method, mapper, mapper_opt))
+    legacy_base = resolve_de_base_legacy(
+        results_dir, au.method, au.mapper, au.mapper_option_set,
+    )
+    legacy_path = legacy_base / contrast / "de_all.tsv"
+    if legacy_path.exists():
+        return legacy_path
 
-    if not units:
-        for method in methods:
-            units.add((method, "star", "default"))
-
-    return [
-        {"method": m, "mapper": p, "mapper_option_set": o}
-        for (m, p, o) in sorted(units)
-    ]
-
-
-def _de_base_for_unit(results_dir: Path, unit: Dict[str, str]) -> Path:
-    method = unit["method"]
-    mapper = unit.get("mapper", "star")
-    mapper_opt = unit.get("mapper_option_set", "default")
-    nested = results_dir / method / "deseq2" / mapper / mapper_opt
-    if nested.exists():
-        return nested
-    return results_dir / method / "deseq2"
+    return de_path  # return expected (new) path even if missing
 
 
 def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None:
@@ -120,9 +96,11 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
 
     results_dir = Path(cfg["_results_dir"])
     methods = methods_override or _infer_methods_from_outputs(results_dir, cfg)
-    analysis_units = _infer_analysis_units(results_dir, methods)
+    analysis_units = infer_analysis_units_from_de_summary(results_dir, methods)
     comparisons = cfg.get("comparisons", [])
     project_name = cfg["project"]["name"]
+
+    selected = read_selected_analysis(results_dir)
 
     rpt = MarkdownReport(f"RNA-seq Analysis Report: {project_name}")
 
@@ -192,63 +170,138 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     else:
         rpt.paragraph("*(Filtering summary not available)*")
 
-    # === DE results per method / contrast ===================================
+    # === Selected analysis branch ===========================================
+    if selected:
+        rpt.h2("Selected Primary Analysis Branch")
+        rpt.paragraph(
+            f"**Selected branch:** `{selected.label}`"
+        )
+        sel_tsv = results_dir / "selected_analysis.tsv"
+        if sel_tsv.exists():
+            rpt.table_from_tsv(sel_tsv)
+        rpt.paragraph(
+            "This branch is emphasised below. All other branches are also "
+            "shown for comparison."
+        )
+
+    # === DE results per analysis unit / contrast ============================
     rpt.h2("Differential Expression Results")
     de_summary = results_dir / "de_summary.tsv"
     if de_summary.exists():
+        rpt.h3("DE Summary Table")
         rpt.table_from_tsv(de_summary)
     else:
         rpt.paragraph("*(DE summary not available)*")
 
-    # Per-analysis-unit detail
-    for unit in analysis_units:
-        method = unit["method"]
-        mapper = unit.get("mapper", "star")
-        mapper_opt = unit.get("mapper_option_set", "default")
-        rpt.h3(f"Analysis Unit: {method} / {mapper} / {mapper_opt}")
+    for au in analysis_units:
+        is_selected = selected is not None and au == selected
+        marker = " [SELECTED]" if is_selected else ""
+        rpt.h3(f"Analysis Unit: {au.label}{marker}")
 
-        de_base = _de_base_for_unit(results_dir, unit)
         for contrast in comparisons:
             cname = contrast["name"]
             rpt.h4(f"Contrast: {cname}")
 
-            de_all = de_base / cname / "de_all.tsv"
-            if de_all.exists():
-                rpt.paragraph(f"Full results: `{de_all}`")
+            de_all = _resolve_de_all_for_unit(results_dir, au, cname)
 
-                # Show top 10 genes
-                rpt.paragraph("**Top 10 genes by adjusted p-value:**")
-                lines: List[str] = []
-                with open(de_all, encoding="utf-8") as fh:
-                    header_line = fh.readline().strip()
-                    headers = header_line.split("\t")
-                    for i, line in enumerate(fh):
-                        if i >= 10:
-                            break
-                        lines.append(line.strip().split("\t"))
+            if not de_all.exists():
+                rpt.paragraph(
+                    f"DE analysis did not complete for "
+                    f"`{au.method}/{au.mapper}/{au.mapper_option_set}"
+                    f"/{au.count_option_set}/{cname}`."
+                )
+                rpt.paragraph(f"Expected path: `{de_all}`")
+                continue
 
-                if lines:
-                    rpt.table(headers, lines)
+            rpt.paragraph(f"Full results: `{de_all}`")
+
+            lines: List[List[str]] = []
+            headers: List[str] = []
+            sig_count = 0
+            with open(de_all, encoding="utf-8") as fh:
+                header_line = fh.readline().strip()
+                headers = header_line.split("\t")
+                padj_idx = -1
+                for idx, h in enumerate(headers):
+                    if "padj" in h.lower():
+                        padj_idx = idx
+                        break
+
+                for i, line in enumerate(fh):
+                    parts = line.strip().split("\t")
+                    if padj_idx >= 0:
+                        try:
+                            pval = float(parts[padj_idx])
+                            if pval < 0.05:
+                                sig_count += 1
+                        except (ValueError, IndexError):
+                            pass
+                    if i < 10:
+                        lines.append(parts)
+
+            if sig_count == 0:
+                rpt.paragraph(
+                    f"DE completed; **0 genes** reached significance "
+                    f"at FDR < 0.05."
+                )
             else:
                 rpt.paragraph(
-                    f"*(Results not found for {method}/{mapper}/{mapper_opt}/{cname})*"
+                    f"**{sig_count} significant genes** (FDR < 0.05)."
                 )
 
+            if lines:
+                rpt.paragraph("**Top 10 genes by adjusted p-value:**")
+                rpt.table(headers, lines)
+
     # === Trimming comparison ================================================
-    rpt.h2("Trimming Method Comparison")
+    rpt.h2("Method and Parameter Comparison")
     comparison_md = results_dir / "reports" / "method_comparison.md"
     if comparison_md.exists():
         rpt.paragraph(
             f"See detailed comparison: [{comparison_md.name}]({comparison_md.name})"
         )
-        # Inline key sections
         content = comparison_md.read_text(encoding="utf-8")
-        # Include everything after the title
         idx = content.find("\n## ")
         if idx >= 0:
             rpt._lines.append(content[idx:])
     else:
         rpt.paragraph("*(Method comparison not available -- run step 10 first)*")
+
+    # === Pipeline Health ====================================================
+    rpt.h2("Pipeline Health")
+    health_checks: List[Dict[str, str]] = []
+
+    for name, path in [
+        ("mapping_summary.tsv", results_dir / "mapping_summary.tsv"),
+        ("featurecounts_summary.tsv", results_dir / "featurecounts_summary.tsv"),
+        ("filtering_summary.tsv", results_dir / "filtering_summary.tsv"),
+        ("de_summary.tsv", results_dir / "de_summary.tsv"),
+        ("selected_analysis.tsv", results_dir / "selected_analysis.tsv"),
+    ]:
+        status = "PASS" if path.exists() else "MISSING"
+        health_checks.append({"check": name, "status": status, "path": str(path)})
+
+    for au in analysis_units:
+        for contrast in comparisons:
+            cname = contrast["name"]
+            de_all = _resolve_de_all_for_unit(results_dir, au, cname)
+            if not de_all.exists():
+                health_checks.append({
+                    "check": f"DE: {au.label}/{cname}",
+                    "status": "MISSING",
+                    "path": str(de_all),
+                })
+            else:
+                health_checks.append({
+                    "check": f"DE: {au.label}/{cname}",
+                    "status": "PASS",
+                    "path": str(de_all),
+                })
+
+    rpt.table(
+        ["Check", "Status", "Path"],
+        [[c["check"], c["status"], f"`{c['path']}`"] for c in health_checks],
+    )
 
     # === IGV Loading Guide ===================================================
     rpt.h2("IGV Coverage Tracks")
@@ -268,7 +321,6 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     rpt.bullet("Take screenshots of 1-2 interesting genes for the report.")
     rpt.paragraph("")
 
-    # List BigWig files found in this run
     bw_files = sorted(results_dir.rglob("*.bw"))
     if bw_files:
         rpt.paragraph(f"**BigWig files produced ({len(bw_files)}):**")
@@ -277,7 +329,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         if len(bw_files) > 20:
             rpt.paragraph(f"*(... and {len(bw_files) - 20} more)*")
     else:
-        rpt.paragraph("*(No BigWig files found -- run step 06)*")
+        rpt.paragraph("*(No BigWig files found -- run BigWig step if needed)*")
 
     # === Top DE genes for IGV ================================================
     rpt.h3("Suggested Genes to Inspect in IGV")
@@ -290,8 +342,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     # === Functional Enrichment Checklist =====================================
     rpt.h2("Functional Enrichment Analysis Checklist")
     rpt.paragraph(
-        "The pipeline exports gene lists ready for external enrichment tools. "
-        "Complete this checklist to earn advanced-task marks."
+        "The pipeline exports gene lists ready for external enrichment tools."
     )
     rpt.paragraph("**Enrichment gene list files (per contrast):**")
     rpt.bullet("`top_genes_for_enrichment.txt` -- all significant DEGs")
@@ -303,7 +354,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     rpt.paragraph("**Step-by-step workflow:**")
     rpt.paragraph(
         "1. Locate the enrichment files in "
-        "`results/<run_id>/<trim_method>/deseq2/<mapper>/<mapper_option>/<contrast>/`"
+        "`results/<run_id>/<trim_method>/deseq2/<mapper>/<mapper_option>/<count_option>/<contrast>/`"
     )
     rpt.paragraph(
         "2. **g:Profiler** (https://biit.cs.ut.ee/gprofiler/gost): "
@@ -325,7 +376,6 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         "adjusted p-values and GO/pathway IDs."
     )
 
-    # List enrichment files found
     enrich_files = sorted(results_dir.rglob("*_for_enrichment.txt"))
     if enrich_files:
         rpt.paragraph(f"\n**Enrichment files produced ({len(enrich_files)}):**")
@@ -341,7 +391,6 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     report_path = results_dir / "reports" / "report.md"
     rpt.write(report_path)
 
-    # Optional HTML
     html_path = render_html(report_path)
     logger.info("Report written: %s", report_path)
     if html_path != report_path:

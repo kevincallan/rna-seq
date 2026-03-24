@@ -5,15 +5,21 @@ RNA-seq Pipeline Orchestrator
 
 Runs the full pipeline or individual steps.  Configuration comes from
 ``config/config.yaml``; dataset and species can be overridden on the
-command line so only one argument changes on exam day.
+command line.
 
-Usage examples (JupyterHub)
----------------------------
-# Full pipeline -- exam day command:
-./py scripts/run_pipeline.py --dataset GSE48519 --species mouse run
+Execution profiles
+------------------
+- ``primary``:    QC -> trim -> map -> count -> filter -> DE -> compare -> report
+- ``primary_bw``: primary + BigWig for the selected branch
+- ``full``:       all steps including BigWig
 
-# Explicit paths:
-./py scripts/run_pipeline.py --data-root /data --dataset GSE48519 --species mouse run
+Usage examples
+--------------
+# Primary analysis (report-ready, no BigWig):
+./py scripts/run_pipeline.py --dataset GSE48519 --species mouse run --profile primary
+
+# Full pipeline with BigWig:
+./py scripts/run_pipeline.py --dataset GSE48519 --species mouse run --profile full
 
 # Specific steps only:
 ./py scripts/run_pipeline.py --dataset GSE48519 --species mouse run --steps 0 1 2 5
@@ -21,11 +27,8 @@ Usage examples (JupyterHub)
 # Override trimming methods:
 ./py scripts/run_pipeline.py --dataset GSE48519 --species mouse run --methods none cutadapt
 
-# Use a specific subset filter:
-./py scripts/run_pipeline.py --dataset GSE48519 --species mouse run --subset day3
-
-# Single step:
-./py scripts/run_pipeline.py --dataset GSE48519 --species mouse run --steps 5
+# Strandedness check (before main analysis):
+./py scripts/run_strand_test.py --config config/config.yaml --dataset GSE48519 --species mouse
 """
 
 from __future__ import annotations
@@ -238,8 +241,8 @@ def _validate_data(
     if not Path(metadata_path).is_file():
         errors.append(f"Metadata CSV not found: {metadata_path}")
 
-    # References only needed for mapping/counting/DE (steps 5-9)
-    steps_needing_refs = {5, 6, 7, 8, 9}
+    # References needed for mapping, counting, DE, and BigWig
+    steps_needing_refs = {5, 6, 7, 8, 10}
     steps_to_run = set(steps) if steps else steps_needing_refs
     if steps_to_run & steps_needing_refs:
         ref_idx = cfg["references"]["genome_index"]
@@ -295,6 +298,9 @@ def _validate_data(
 # Step registry
 # ---------------------------------------------------------------------------
 
+# Step ordering: BigWig moved after DE so DESeq2 size factors are available.
+# Physical filenames (e.g. 06_bigwig.py) are kept to minimise churn;
+# the dict mapping controls actual execution order.
 STEPS = {
     0:  ("00_validate_env",     "Validate environment"),
     1:  ("01_prepare_samples",  "Prepare samples"),
@@ -302,15 +308,25 @@ STEPS = {
     3:  ("03_qc_fastqc",       "FastQC"),
     4:  ("04_multiqc",         "MultiQC"),
     5:  ("05_map_star",        "Read mapping"),
-    6:  ("06_bigwig",          "BigWig generation"),
-    7:  ("07_featurecounts",   "featureCounts"),
-    8:  ("08_filter_matrix",   "Filter count matrix"),
-    9:  ("09_deseq2",         "DESeq2"),
-    10: ("10_compare_methods", "Compare methods"),
+    6:  ("07_featurecounts",   "featureCounts"),
+    7:  ("08_filter_matrix",   "Filter count matrix"),
+    8:  ("09_deseq2",         "DESeq2"),
+    9:  ("10_compare_methods", "Compare methods"),
+    10: ("06_bigwig",          "BigWig generation"),
     11: ("11_make_report",     "Generate report"),
 }
 
 ALL_STEPS = sorted(STEPS.keys())
+
+# Execution profiles: predefined step lists for common workflows.
+# primary     -- fastest path to a complete report (no BigWig).
+# primary_bw  -- primary + BigWig for the selected branch.
+# full        -- everything including BigWig.
+PROFILES = {
+    "primary":    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11],
+    "primary_bw": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+    "full":       list(range(12)),
+}
 
 
 def import_step(step_num: int):
@@ -373,16 +389,8 @@ def run_pipeline(
                 cfg = mod.main(cfg, run_id)
             elif step_num == 1:
                 mod.main(cfg, subset_name=subset_name)
-            elif step_num in (2, 3, 4, 5, 6, 7, 8):
-                mod.main(cfg, methods_override=methods_override)
-            elif step_num == 9:
-                mod.main(cfg, methods_override=methods_override)
-            elif step_num == 10:
-                mod.main(cfg, methods_override=methods_override)
-            elif step_num == 11:
-                mod.main(cfg, methods_override=methods_override)
             else:
-                mod.main(cfg)
+                mod.main(cfg, methods_override=methods_override)
 
         except Exception as exc:
             logger.error(
@@ -490,6 +498,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Force regeneration of outputs that already exist (e.g. BigWig files)",
     )
+    run_p.add_argument(
+        "--profile",
+        choices=sorted(PROFILES.keys()),
+        default=None,
+        help=(
+            "Execution profile: 'primary' (report-ready, no BigWig), "
+            "'primary_bw' (primary + BigWig for selected branch), "
+            "'full' (all steps). Overridden by --steps if both given."
+        ),
+    )
 
     # --- list subcommand ----------------------------------------------------
     sub.add_parser("list", help="List available pipeline steps")
@@ -529,8 +547,17 @@ def main() -> None:
     # Set up logging
     setup_logging(cfg["project"]["logs_dir"], run_id)
 
+    # --- Resolve step list from --profile / --steps --------------------------
+    explicit_steps = getattr(args, "steps", None)
+    profile_name = getattr(args, "profile", None)
+    if explicit_steps is not None:
+        steps_to_run = explicit_steps
+    elif profile_name is not None:
+        steps_to_run = PROFILES[profile_name]
+    else:
+        steps_to_run = ALL_STEPS
+
     # --- Validate data paths before heavy compute ---------------------------
-    steps_to_run = getattr(args, "steps", None) or ALL_STEPS
     _validate_data(cfg, strict=args.strict, steps=steps_to_run)
 
     # Pre-enrich config with runtime paths (step 00 will enrich further)
@@ -550,7 +577,7 @@ def main() -> None:
         run_pipeline(
             cfg,
             run_id,
-            steps=args.steps,
+            steps=steps_to_run,
             methods_override=args.methods,
             subset_name=args.subset,
         )

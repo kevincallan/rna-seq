@@ -19,7 +19,7 @@ import logging
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -254,61 +254,7 @@ def parse_fc_summary(summary_path: Path) -> Dict[str, Dict[str, str]]:
     return stats
 
 
-def build_mapping_units(
-    results_dir: Path,
-    samples: list,
-    methods: List[str],
-    use_filtered_bam: bool = False,
-) -> List[Dict[str, Any]]:
-    """Collect mapping units from mapping_summary.tsv (or legacy STAR layout).
-
-    If use_filtered_bam is True and mapping_summary has filtered_bam_path,
-    use that instead of bam_path for counting (post-step-5 filtered BAMs).
-    """
-    mapping_summary = results_dir / "mapping_summary.tsv"
-    units: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-
-    if mapping_summary.exists():
-        with open(mapping_summary, encoding="utf-8") as fh:
-            reader = csv.DictReader(fh, delimiter="\t")
-            for row in reader:
-                method = row.get("method") or row.get("trim_method") or ""
-                mapper = row.get("mapper", "star")
-                mapper_opt = row.get("mapper_option_set", "default")
-                sample = row.get("sample", "")
-                bam_path = row.get("bam_path", "")
-                if use_filtered_bam and row.get("filtered_bam_path"):
-                    bam_path = row.get("filtered_bam_path", "")
-                if method not in methods or not sample or not bam_path:
-                    continue
-                key = (method, mapper, mapper_opt)
-                if key not in units:
-                    units[key] = {
-                        "method": method,
-                        "mapper": mapper,
-                        "mapper_option_set": mapper_opt,
-                        "sample_to_bam": {},
-                    }
-                units[key]["sample_to_bam"][sample] = Path(bam_path)
-
-    if not units:
-        # Legacy fallback (single STAR run per trimming method)
-        for method in methods:
-            sample_to_bam: Dict[str, Path] = {}
-            star_dir = results_dir / method / "star"
-            for s in samples:
-                bam = star_dir / f"{s.sample_name}_Aligned.sortedByCoord.out.bam"
-                if bam.exists():
-                    sample_to_bam[s.sample_name] = bam
-            if sample_to_bam:
-                units[(method, "star", "default")] = {
-                    "method": method,
-                    "mapper": "star",
-                    "mapper_option_set": "default",
-                    "sample_to_bam": sample_to_bam,
-                }
-
-    return [units[k] for k in sorted(units.keys())]
+from src.analysis_unit import build_mapping_units_with_bams
 
 
 def _prepare_gtf(cfg: Dict[str, Any], results_dir: Path) -> str:
@@ -376,7 +322,7 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     use_filtered_bam = cfg.get("featurecounts", {}).get("use_filtered_bam", False)
     if use_filtered_bam:
         logger.info("Using filtered BAMs for counting (featurecounts.use_filtered_bam=true)")
-    mapping_units = build_mapping_units(
+    mapping_units = build_mapping_units_with_bams(
         results_dir, samples, methods, use_filtered_bam=use_filtered_bam
     )
 
@@ -466,6 +412,36 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
                         row_data[col] = sname_vals.get(raw_sname, "0")
                     all_summary_rows.append(row_data)
 
+    # Compute Assigned_pct for each row
+    for row_data in all_summary_rows:
+        key_cols_set = {"trim_method", "mapper", "mapper_option_set",
+                        "option_set", "sample", "Assigned_pct"}
+        total = 0
+        for k, v in row_data.items():
+            if k in key_cols_set:
+                continue
+            try:
+                total += int(v)
+            except (ValueError, TypeError):
+                pass
+        assigned = int(row_data.get("Assigned", 0))
+        row_data["Assigned_pct"] = f"{100.0 * assigned / total:.1f}" if total > 0 else "0.0"
+
+    # Check for low assigned rates that suggest wrong strandedness
+    if all_summary_rows:
+        default_rows = [r for r in all_summary_rows if r.get("option_set") == "default"]
+        check_rows = default_rows or all_summary_rows
+        pcts = [float(r.get("Assigned_pct", "0")) for r in check_rows]
+        mean_pct = sum(pcts) / len(pcts) if pcts else 0.0
+        if mean_pct < 30.0:
+            logger.warning(
+                "LOW ASSIGNED RATE (%.1f%% mean for 'default' option set). "
+                "This often indicates wrong strandedness. Current setting: "
+                "featurecounts.strandedness=%s. Run "
+                "'./py scripts/run_strand_test.py --config <config>' to check.",
+                mean_pct, cfg.get("featurecounts", {}).get("strandedness", "?"),
+            )
+
     # Write featureCounts summary with all status categories
     fc_summary_path = results_dir / "featurecounts_summary.tsv"
     if all_summary_rows:
@@ -474,12 +450,13 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
             "option_set", "sample",
         ]
         stat_cols = sorted(
-            {k for row in all_summary_rows for k in row if k not in key_cols}
+            {k for row in all_summary_rows for k in row
+             if k not in key_cols and k != "Assigned_pct"}
         )
-        # Put Assigned first among stat columns
         if "Assigned" in stat_cols:
             stat_cols.remove("Assigned")
             stat_cols = ["Assigned"] + stat_cols
+        stat_cols.append("Assigned_pct")
         fieldnames = key_cols + stat_cols
 
         with open(fc_summary_path, "w", newline="", encoding="utf-8") as fh:
