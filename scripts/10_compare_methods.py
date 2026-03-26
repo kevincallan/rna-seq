@@ -438,6 +438,105 @@ def _mean(values: List[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _apply_selection_policy(
+    cfg: Dict[str, Any],
+    results_dir: Path,
+    units: List[AnalysisUnit],
+    metrics: Dict[AnalysisUnit, Dict[str, Any]],
+) -> Tuple[Optional[AnalysisUnit], Optional[AnalysisUnit], str, str]:
+    """Apply the explicit selection policy from config.
+
+    Overrides all older manual selectors (selected_count_comparison,
+    selected_branch, selected_visualisation) when selection: is present.
+
+    Returns (primary_au, comparison_au, primary_reason, comparison_reason).
+    Raises RuntimeError if the primary branch cannot be found or is redundant.
+    """
+    sel = cfg["selection"]
+    trim = sel["preferred_trim_method"]
+    mapper = sel["preferred_mapper"]
+    mapper_opt = sel["preferred_mapper_option_set"]
+    primary_cos = sel["primary_count_option_set"]
+    comparison_cos_list = sel.get("comparison_count_option_sets", [])
+
+    candidates = [
+        u for u in units
+        if u.method == trim
+        and u.mapper == mapper
+        and u.mapper_option_set == mapper_opt
+    ]
+    logger.info(
+        "Selection policy: %d candidates matching %s/%s/%s (from %d total units)",
+        len(candidates), trim, mapper, mapper_opt, len(units),
+    )
+
+    def _is_selectable(au: AnalysisUnit) -> bool:
+        m = metrics.get(au)
+        if m is None:
+            return False
+        return not m["is_redundant"]
+
+    def _warn_if_no_de(au: AnalysisUnit, role: str) -> None:
+        m = metrics.get(au)
+        if m is not None and not m["de_any_valid"]:
+            logger.warning(
+                "Selection policy: %s branch %s has no valid DE results. "
+                "Proceeding anyway -- check upstream steps.",
+                role, au.label,
+            )
+
+    # --- Primary ---
+    primary = next(
+        (u for u in candidates if u.count_option_set == primary_cos), None
+    )
+    if primary is None or not _is_selectable(primary):
+        raise RuntimeError(
+            f"Selection policy: primary branch {trim}/{mapper}/{mapper_opt}/"
+            f"{primary_cos} not found in inferred units or is redundant. "
+            f"Candidates: {[u.label for u in candidates]}"
+        )
+    _warn_if_no_de(primary, "primary")
+
+    primary_reason = f"selection_policy:primary={primary.label}"
+    write_selected_analysis(results_dir, primary, reason=primary_reason)
+    write_selected_visualisation(results_dir, primary, reason=primary_reason)
+    logger.info(
+        "Selection policy: primary/analysis branch = %s (%s)",
+        primary.label, primary_reason,
+    )
+    logger.info(
+        "Selection policy: visualisation branch    = %s (%s)",
+        primary.label, primary_reason,
+    )
+
+    # --- Comparison ---
+    comparison = next(
+        (u for u in candidates
+         if u.count_option_set != primary_cos
+         and u.count_option_set in comparison_cos_list
+         and _is_selectable(u)),
+        None,
+    )
+
+    if comparison is not None:
+        _warn_if_no_de(comparison, "comparison")
+        comp_reason = f"selection_policy:comparison={comparison.label}"
+        write_selected_count_comparison(results_dir, comparison, reason=comp_reason)
+        logger.info(
+            "Selection policy: comparison branch       = %s (%s)",
+            comparison.label, comp_reason,
+        )
+    else:
+        comp_reason = "selection_policy:comparison_not_available"
+        logger.warning(
+            "Selection policy: no valid comparison branch found among %s "
+            "(candidates: %s). selected_count_comparison.tsv NOT written.",
+            comparison_cos_list, [u.label for u in candidates],
+        )
+
+    return primary, comparison, primary_reason, comp_reason
+
+
 def _select_count_comparison_branch(
     cfg: Dict[str, Any],
     results_dir: Path,
@@ -538,12 +637,26 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         units, mapping_data, fc_data, filtering_data, de_summary_data, redundancy_data
     )
 
-    selected_count, count_reason = _select_count_comparison_branch(cfg, results_dir, units, metrics)
-    selected_vis, vis_reason = _select_visualisation_branch(cfg, results_dir, units)
-
-    # Legacy compatibility: keep selected_analysis.tsv as count-comparison selection.
-    if selected_count is not None:
-        write_selected_analysis(results_dir, selected_count, reason=f"compat_from_count_comparison:{count_reason}")
+    if cfg.get("selection"):
+        selected_primary, selected_comparison, primary_reason, comp_reason = (
+            _apply_selection_policy(cfg, results_dir, units, metrics)
+        )
+        selected_count = selected_comparison
+        selected_vis = selected_primary
+        count_reason = comp_reason
+        vis_reason = primary_reason
+    else:
+        selected_count, count_reason = _select_count_comparison_branch(
+            cfg, results_dir, units, metrics,
+        )
+        selected_vis, vis_reason = _select_visualisation_branch(
+            cfg, results_dir, units,
+        )
+        if selected_count is not None:
+            write_selected_analysis(
+                results_dir, selected_count,
+                reason=f"compat_from_count_comparison:{count_reason}",
+            )
 
     report_dir = results_dir / "reports"
     ensure_dirs(report_dir)
@@ -562,8 +675,19 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         )
     lines.append("")
     lines.append("## Selection Outcomes")
-    lines.append(f"- Selected count-comparison branch: `{selected_count.label if selected_count else 'N/A'}` ({count_reason})")
-    lines.append(f"- Selected visualisation branch: `{selected_vis.label if selected_vis else 'N/A'}` ({vis_reason})")
+    if cfg.get("selection"):
+        lines.append(
+            f"- Selected primary analysis branch: "
+            f"`{selected_vis.label if selected_vis else 'N/A'}` ({vis_reason})"
+        )
+    lines.append(
+        f"- Selected count-comparison branch: "
+        f"`{selected_count.label if selected_count else 'N/A'}` ({count_reason})"
+    )
+    lines.append(
+        f"- Selected visualisation branch: "
+        f"`{selected_vis.label if selected_vis else 'N/A'}` ({vis_reason})"
+    )
     lines.append("- Count comparison focuses on featureCounts option interpretation.")
     lines.append("- Visualisation branch is used for selected-only BigWig generation.")
     lines.append("")

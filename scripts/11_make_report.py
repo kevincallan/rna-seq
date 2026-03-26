@@ -127,7 +127,8 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
     selected_count = read_selected_count_comparison(results_dir)
     selected_vis = read_selected_visualisation(results_dir)
     selected_legacy = read_selected_analysis(results_dir)
-    selected = selected_count or selected_legacy
+    selected_primary = selected_legacy
+    selected = selected_primary or selected_count
 
     rpt = MarkdownReport(f"RNA-seq Analysis Report: {project_name}")
 
@@ -232,31 +233,31 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         rpt.paragraph("*(Filtering summary not available)*")
 
     # === Selected analysis branches =========================================
-    if selected_count or selected_vis or selected_legacy:
+    if selected_primary or selected_count or selected_vis:
         rpt.h2("Selected Analysis Branches")
+        if selected_primary:
+            rpt.paragraph(
+                f"**Primary analysis branch:** `{selected_primary.label}`"
+            )
+            sel_tsv = results_dir / "selected_analysis.tsv"
+            if sel_tsv.exists():
+                rpt.table_from_tsv(sel_tsv)
         if selected_count:
-            rpt.paragraph(f"**Count-comparison branch:** `{selected_count.label}`")
+            rpt.paragraph(
+                f"**Count-comparison branch:** `{selected_count.label}`"
+            )
             cc_tsv = results_dir / "selected_count_comparison.tsv"
             if cc_tsv.exists():
                 rpt.table_from_tsv(cc_tsv)
-        elif selected_legacy:
-            rpt.paragraph(
-                f"**Count-comparison branch (legacy fallback):** `{selected_legacy.label}`"
-            )
-
         if selected_vis:
-            rpt.paragraph(f"**Visualisation branch (BigWig/IGV):** `{selected_vis.label}`")
+            rpt.paragraph(
+                f"**Visualisation branch (BigWig/IGV):** `{selected_vis.label}`"
+            )
             vis_tsv = results_dir / "selected_visualisation.tsv"
             if vis_tsv.exists():
                 rpt.table_from_tsv(vis_tsv)
         else:
             rpt.paragraph("*(selected_visualisation.tsv not found)*")
-
-        if selected_legacy:
-            sel_tsv = results_dir / "selected_analysis.tsv"
-            if sel_tsv.exists():
-                rpt.paragraph("Legacy selected branch compatibility file:")
-                rpt.table_from_tsv(sel_tsv)
 
     # === DE results per analysis unit / contrast ============================
     rpt.h2("Differential Expression Results")
@@ -269,6 +270,8 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
 
     for au in analysis_units:
         markers: List[str] = []
+        if selected_primary is not None and au == selected_primary:
+            markers.append("PRIMARY")
         if selected_count is not None and au == selected_count:
             markers.append("COUNT_COMPARISON")
         if selected_vis is not None and au == selected_vis:
@@ -426,9 +429,9 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
         })
 
     selected_refs = [
+        ("selected_primary_analysis", selected_primary),
         ("selected_count_comparison", selected_count),
         ("selected_visualisation", selected_vis),
-        ("selected_analysis_legacy", selected_legacy),
     ]
     real_branches = set(branch4_de_status.keys())
     for label, selected_unit in selected_refs:

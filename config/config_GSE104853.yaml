@@ -194,6 +194,19 @@ comparisons:
     numerator: "mirna125a"
     denominator: "ctrl"
 
+# -- Selection policy (exam-focused) -----------------------------------------
+# When present, overrides ALL automatic and manual branch selection in step 10.
+# selected_analysis.tsv and selected_visualisation.tsv -> primary branch.
+# selected_count_comparison.tsv -> comparison branch.
+selection:
+  preferred_trim_method: "cutadapt"
+  preferred_mapper: "star"
+  preferred_mapper_option_set: "default"
+  primary_count_option_set: "default"
+  comparison_count_option_sets:
+    - "default"
+    - "multimapper"
+
 # -- BigWig parameters --------------------------------------------------------
 bigwig:
   normalization: "CPM"
