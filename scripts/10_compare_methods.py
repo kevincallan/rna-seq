@@ -680,14 +680,22 @@ def main(cfg: Dict[str, Any], methods_override: List[str] | None = None) -> None
             f"- Selected primary analysis branch: "
             f"`{selected_vis.label if selected_vis else 'N/A'}` ({vis_reason})"
         )
-    lines.append(
-        f"- Selected count-comparison branch: "
-        f"`{selected_count.label if selected_count else 'N/A'}` ({count_reason})"
-    )
-    lines.append(
-        f"- Selected visualisation branch: "
-        f"`{selected_vis.label if selected_vis else 'N/A'}` ({vis_reason})"
-    )
+        lines.append(
+            f"- Selected count-comparison branch: "
+            f"`{selected_count.label if selected_count else 'N/A'}` ({count_reason})"
+        )
+        lines.append(
+            "- Visualisation branch follows the primary analysis branch."
+        )
+    else:
+        lines.append(
+            f"- Selected count-comparison branch: "
+            f"`{selected_count.label if selected_count else 'N/A'}` ({count_reason})"
+        )
+        lines.append(
+            f"- Selected visualisation branch: "
+            f"`{selected_vis.label if selected_vis else 'N/A'}` ({vis_reason})"
+        )
     lines.append("- Count comparison focuses on featureCounts option interpretation.")
     lines.append("- Visualisation branch is used for selected-only BigWig generation.")
     lines.append("")
