@@ -328,48 +328,64 @@ def _find_secondary_grouping_columns(
 ) -> List[Dict[str, Any]]:
     """Return plausible secondary biological grouping columns.
 
-    Searches the matched (assay-filtered) subset for columns that also vary
-    with 2-6 balanced, non-ID-like unique values -- excluding SKIP_COLS and
-    the already-chosen condition column.  No column names are hardcoded.
+    Searches the matched (assay-filtered) subset for columns that also vary,
+    excluding SKIP_COLS and the chosen condition column.  Accepts candidates
+    in two modes:
+
+    A. 2-6 balanced non-empty unique values (standard case).
+    B. Exactly 1 non-empty unique value with at least 1 missing/blank row
+       (partially-annotated column -- still signals a biological subgroup).
+
+    No column names are hardcoded.
     """
+    total = len(matched_rows)
     results: List[Dict[str, Any]] = []
     for col in columns:
         if col in SKIP_COLS or col == chosen_condition_col:
             continue
-        values = Counter(
-            r.get(col, "").strip()
-            for r in matched_rows
-            if r.get(col, "").strip()
-        )
-        n_unique = len(values)
-        if n_unique < 2 or n_unique > 6:
-            continue
 
-        counts = list(values.values())
-        max_c, min_c = max(counts), min(counts)
-        balance = max_c / min_c if min_c > 0 else 999.0
-        if balance >= 5:
+        all_vals = [r.get(col, "").strip() for r in matched_rows]
+        non_empty = Counter(v for v in all_vals if v)
+        n_missing = sum(1 for v in all_vals if not v)
+        n_unique = len(non_empty)
+
+        if n_unique == 0:
             continue
 
         id_like = sum(
-            1 for v in values if re.match(r"^\d+$", v) or len(v) > 60
+            1 for v in non_empty if re.match(r"^\d+$", v) or len(v) > 60
         )
         if id_like > 0:
             continue
 
+        accept = False
         score = 0.0
-        if 2 <= n_unique <= 4:
-            score += 10
-        else:
-            score += 5
-        if balance < 3:
-            score += 5
-        score -= (n_unique - 2) * 0.5
+
+        if 2 <= n_unique <= 6:
+            counts = list(non_empty.values())
+            max_c, min_c = max(counts), min(counts)
+            balance = max_c / min_c if min_c > 0 else 999.0
+            if balance < 5:
+                accept = True
+                if 2 <= n_unique <= 4:
+                    score += 10
+                else:
+                    score += 5
+                if balance < 3:
+                    score += 5
+                score -= (n_unique - 2) * 0.5
+        elif n_unique == 1 and n_missing > 0:
+            accept = True
+            score += 6
+
+        if not accept:
+            continue
 
         results.append({
             "col": col,
-            "values": values,
+            "values": non_empty,
             "n_unique": n_unique,
+            "n_missing": n_missing,
             "score": score,
         })
 
@@ -567,33 +583,53 @@ def generate_config(
         top_sec = secondary_cols[0]
         sec_col = top_sec["col"]
         sec_vals = sorted(top_sec["values"].keys())
+        n_missing = top_sec.get("n_missing", 0)
+
         sec_val_summary = ", ".join(
             f"{v} ({top_sec['values'][v]})" for v in sec_vals
         )
         secondary_summary_lines.append(
-            f"  Secondary grouping: {sec_col} "
-            f"({top_sec['n_unique']} values: {sec_val_summary})"
+            f"  Secondary grouping: {sec_col}"
         )
         secondary_summary_lines.append(
-            "    WARNING: another biological axis varies in the matched subset."
+            f"    Non-empty values: {sec_val_summary}"
         )
+        if n_missing > 0:
+            secondary_summary_lines.append(
+                f"    Missing values: {n_missing}"
+            )
+            secondary_summary_lines.append(
+                "    WARNING: matched subset mixes annotated and "
+                "unannotated samples for this column."
+            )
+        else:
+            secondary_summary_lines.append(
+                "    WARNING: another biological axis varies in the "
+                "matched subset."
+            )
         secondary_summary_lines.append(
             "    Subgroup subset_filters have been added to the draft config."
         )
         todos.append(
             f"Review secondary grouping column: {sec_col} "
-            f"({top_sec['n_unique']} values)"
+            f"({top_sec['n_unique']} non-empty values"
+            f"{f', {n_missing} missing' if n_missing else ''})"
         )
 
         sec_lines = []
         sec_lines.append(
-            f'  # WARNING: column "{sec_col}" also varies across matched samples.'
+            f'  # WARNING: column "{sec_col}" also varies in the '
+            f"matched subset."
         )
+        for sv in sec_vals:
+            sec_lines.append(
+                f"  # Non-empty values: {sv} ({top_sec['values'][sv]})"
+            )
+        if n_missing > 0:
+            sec_lines.append(f"  # Missing/blank rows: {n_missing}")
         sec_lines.append(
-            "  # Consider restricting to one subgroup for a cleaner DE comparison."
-        )
-        sec_lines.append(
-            "  # Subgroup filters (set active_subset to use one):"
+            "  # Consider switching active_subset to one subgroup "
+            "for a cleaner DE comparison."
         )
         for sv in sec_vals:
             filter_name = safe_name(f"{sec_col}_{sv}").lower()
@@ -770,8 +806,7 @@ selection:
   preferred_mapper_option_set: "default"
   primary_count_option_set: "default"
   comparison_count_option_sets:
-    - "default"
-    - "multimapper\""""
+    - "default\""""
     else:
         selection_block = """\
 # -- Selection policy (optional) ----------------------------------------------

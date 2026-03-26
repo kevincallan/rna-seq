@@ -1,0 +1,174 @@
+# =============================================================================
+# Example: RNA-seq config with a secondary biological grouping column
+# =============================================================================
+# This is a reference example showing the output of:
+#   ./py scripts/inspect_metadata.py /data/GSE_MIXED/metadata.csv \
+#       --write-config config/config_GSE_MIXED.yaml --minimal
+#
+# Scenario:
+#   - 12 matched RNA-seq samples out of 192 total metadata rows
+#   - Mixed assays in accession (RNA-Seq, ChIP-Seq, Bisulfite-Seq)
+#   - Main condition column: genotype (wt, tet1, tet2)
+#   - Secondary grouping column: differentiation
+#     - Some rows annotated ("differentiation day 3"), some blank
+#     - The generator detects this and adds subgroup subset_filters
+#   - The default subset uses all matched RNA-seq samples
+#   - Subgroup filters let you restrict to annotated samples only
+# =============================================================================
+
+# -- Project metadata ---------------------------------------------------------
+project:
+  name: "GSE_MIXED"
+  results_dir: "results"
+  work_dir: "work"
+  cache_dir: "cache"
+  logs_dir: "logs"
+  threads: 6
+
+# -- Input data ---------------------------------------------------------------
+data:
+  metadata_csv: "/data/GSE_MIXED/metadata.csv"
+  fastq_dir: "/data/GSE_MIXED"
+  layout: "paired"
+
+# -- Column mapping -----------------------------------------------------------
+# TODO: verify condition column choice
+column_mapping:
+  run_id_col: "Run"
+  condition_cols:
+    - "genotype"
+  condition_map:
+    "wild-type": "wt"
+    "tet1-/-": "tet1"
+    "tet2-/-": "tet2"
+  replicate_strategy: "sorted_run_id"
+
+# -- Subset filters -----------------------------------------------------------
+subset_filters:
+  default:
+    "Assay Type": "RNA-Seq"
+
+  # WARNING: column "differentiation" also varies in the matched subset.
+  # Non-empty values: differentiation day 3 (6)
+  # Missing/blank rows: 6
+  # Consider switching active_subset to one subgroup for a cleaner DE comparison.
+  differentiation_day3:
+    "Assay Type": "RNA-Seq"
+    "differentiation": "differentiation day 3"
+
+active_subset: "default"  # TODO: switch to "differentiation_day3" if needed
+
+# -- Reference genome ---------------------------------------------------------
+# Auto-detected: mouse
+references:
+  genome_index: "/data/indices/mm39/star"
+  gtf: "/data/genomes/mouse/GRCm39/Mus_musculus.GRCm39.115.chr_gene_names.gtf.gz"
+  genome_fasta: "/data/genomes/mouse/GRCm39/Mus_musculus.GRCm39.dna.primary_assembly.fa.gz"
+
+# -- Tool paths ---------------------------------------------------------------
+tools:
+  fastqc: "fastqc"
+  multiqc: "multiqc"
+  cutadapt: "cutadapt"
+  fastp: "fastp"
+  trimmomatic: "trimmomatic"
+  star: "STAR"
+  hisat2: "hisat2"
+  samtools: "samtools"
+  featurecounts: "featureCounts"
+  bamcoverage: "bamCoverage"
+
+# -- Mapping approaches -------------------------------------------------------
+mapping:
+  backends:
+    star:
+      enabled: true
+      genome_index: "/data/indices/mm39/star"
+      option_sets:
+        default:
+          outFilterMultimapNmax: 20
+          extra_args: ""
+    hisat2:
+      enabled: false
+
+# -- STAR mapping parameters --------------------------------------------------
+star_params:
+  outSAMtype: "BAM SortedByCoordinate"
+  readFilesCommand: "zcat"
+  outFilterMultimapNmax: 20
+  extra_args: ""
+
+# -- Trimming methods ---------------------------------------------------------
+trimming:
+  primary_method: "cutadapt"
+  compare_methods: false
+  comparison_methods: []
+
+  none:
+    enabled: false
+
+  cutadapt:
+    enabled: true
+    adapter_fwd: ""
+    adapter_rev: ""
+    quality: 20
+    min_length: 25
+    extra_args: ""
+
+# -- featureCounts options ----------------------------------------------------
+featurecounts:
+  backend: "featurecounts"
+  strandedness: 0  # TODO: check dataset protocol (0=unstranded, 1=stranded, 2=reverse-stranded)
+  use_filtered_bam: false
+  feature_type: "exon"
+  attribute: "gene_name"  # TODO: change to "gene_id" if Ensembl IDs are preferred
+  gtf_filter: "gene_name"
+  option_sets:
+    default:
+      label: "Default"
+      B: false
+      P: false
+      C: false
+      Q: 0
+      extra_args: ""
+
+# -- Matrix filtering ---------------------------------------------------------
+filtering:
+  min_max_count: "auto"
+
+# -- DESeq2 parameters --------------------------------------------------------
+deseq2:
+  fdr_threshold: 0.05
+  lfc_threshold: 0.0
+  method: "pydeseq2"
+  reference_level: "wt"  # TODO: confirm reference level
+
+# -- Contrasts / comparisons --------------------------------------------------
+comparisons:
+  # NOTE: multiple treatment groups detected.
+  # Only pairwise-vs-reference comparisons are generated.
+  # Add or remove contrasts as needed.
+  - name: "tet1_vs_wt"
+    numerator: "tet1"
+    denominator: "wt"
+  - name: "tet2_vs_wt"
+    numerator: "tet2"
+    denominator: "wt"
+
+# -- Selection policy ---------------------------------------------------------
+selection:
+  preferred_trim_method: "cutadapt"
+  preferred_mapper: "star"
+  preferred_mapper_option_set: "default"
+  primary_count_option_set: "default"
+  comparison_count_option_sets:
+    - "default"
+
+# -- BigWig parameters --------------------------------------------------------
+bigwig:
+  enabled: false
+  mode: "selected_only"
+  normalization: "CPM"
+  mapq_filter: 255
+  bin_size: 50
+  use_deseq2_sizefactors: true

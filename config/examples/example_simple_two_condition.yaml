@@ -1,0 +1,155 @@
+# =============================================================================
+# Example: Simple two-condition RNA-seq config (treatment vs control)
+# =============================================================================
+# This is a reference example showing the output of:
+#   ./py scripts/inspect_metadata.py /data/GSE_EXAMPLE/metadata.csv \
+#       --write-config config/config_GSE_EXAMPLE.yaml --minimal
+#
+# Scenario:
+#   - 6 samples: 3 control + 3 treated
+#   - Single organism (human or mouse)
+#   - All RNA-Seq, all paired-end
+#   - One condition column with two levels
+#   - No secondary grouping columns
+# =============================================================================
+
+# -- Project metadata ---------------------------------------------------------
+project:
+  name: "GSE_EXAMPLE"
+  results_dir: "results"
+  work_dir: "work"
+  cache_dir: "cache"
+  logs_dir: "logs"
+  threads: 6
+
+# -- Input data ---------------------------------------------------------------
+data:
+  metadata_csv: "/data/GSE_EXAMPLE/metadata.csv"
+  fastq_dir: "/data/GSE_EXAMPLE"
+  layout: "paired"
+
+# -- Column mapping -----------------------------------------------------------
+column_mapping:
+  run_id_col: "Run"
+  condition_cols:
+    - "treatment"
+  condition_map:
+    "negative control": "ctrl"
+    "drug treatment": "treated"
+  replicate_strategy: "sorted_run_id"
+
+# -- Subset filters -----------------------------------------------------------
+subset_filters:
+  default:
+    "Assay Type": "RNA-Seq"
+
+active_subset: "default"
+
+# -- Reference genome ---------------------------------------------------------
+# Auto-detected: human
+references:
+  genome_index: "/data/indices/hg38/star"
+  gtf: "/data/genomes/human/hg38/Homo_sapiens.GRCh38.115.chr.gtf.gz"
+  genome_fasta: "/data/genomes/human/hg38/hg38.fa"
+
+# -- Tool paths ---------------------------------------------------------------
+tools:
+  fastqc: "fastqc"
+  multiqc: "multiqc"
+  cutadapt: "cutadapt"
+  fastp: "fastp"
+  trimmomatic: "trimmomatic"
+  star: "STAR"
+  hisat2: "hisat2"
+  samtools: "samtools"
+  featurecounts: "featureCounts"
+  bamcoverage: "bamCoverage"
+
+# -- Mapping approaches -------------------------------------------------------
+mapping:
+  backends:
+    star:
+      enabled: true
+      genome_index: "/data/indices/hg38/star"
+      option_sets:
+        default:
+          outFilterMultimapNmax: 20
+          extra_args: ""
+    hisat2:
+      enabled: false
+
+# -- STAR mapping parameters --------------------------------------------------
+star_params:
+  outSAMtype: "BAM SortedByCoordinate"
+  readFilesCommand: "zcat"
+  outFilterMultimapNmax: 20
+  extra_args: ""
+
+# -- Trimming methods ---------------------------------------------------------
+trimming:
+  primary_method: "cutadapt"
+  compare_methods: false
+  comparison_methods: []
+
+  none:
+    enabled: false
+
+  cutadapt:
+    enabled: true
+    adapter_fwd: ""
+    adapter_rev: ""
+    quality: 20
+    min_length: 25
+    extra_args: ""
+
+# -- featureCounts options ----------------------------------------------------
+featurecounts:
+  backend: "featurecounts"
+  strandedness: 0  # TODO: check dataset protocol (0=unstranded, 1=stranded, 2=reverse-stranded)
+  use_filtered_bam: false
+  feature_type: "exon"
+  attribute: "gene_name"  # TODO: change to "gene_id" if Ensembl IDs are preferred
+  gtf_filter: "gene_name"
+  option_sets:
+    default:
+      label: "Default"
+      B: false
+      P: false
+      C: false
+      Q: 0
+      extra_args: ""
+
+# -- Matrix filtering ---------------------------------------------------------
+filtering:
+  min_max_count: "auto"
+
+# -- DESeq2 parameters --------------------------------------------------------
+deseq2:
+  fdr_threshold: 0.05
+  lfc_threshold: 0.0
+  method: "pydeseq2"
+  reference_level: "ctrl"
+
+# -- Contrasts / comparisons --------------------------------------------------
+comparisons:
+  - name: "treated_vs_ctrl"
+    numerator: "treated"
+    denominator: "ctrl"
+
+# -- Selection policy ---------------------------------------------------------
+selection:
+  preferred_trim_method: "cutadapt"
+  preferred_mapper: "star"
+  preferred_mapper_option_set: "default"
+  primary_count_option_set: "default"
+  comparison_count_option_sets:
+    - "default"
+
+# -- BigWig parameters --------------------------------------------------------
+bigwig:
+  enabled: false
+  mode: "selected_only"
+  normalization: "CPM"
+  mapq_filter: 255
+  bin_size: 50
+  use_deseq2_sizefactors: true
