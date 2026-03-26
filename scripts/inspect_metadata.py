@@ -656,6 +656,7 @@ def generate_config(
             sec_lines.append(f"  {filter_name}:")
             sec_lines.append(f'    "Assay Type": "{assay}"')
             sec_lines.append(f'    "{sec_col}": "{sv}"')
+        sec_lines.append("")
         secondary_filter_block = "\n".join(sec_lines)
 
     # --- Build conditional YAML sections ---
@@ -845,6 +846,11 @@ featurecounts:
 #     - "default"
 #     - "multimapper\""""
 
+    active_subset_comment = (
+        "  # TODO: consider switching to a subgroup filter"
+        if secondary_filter_block else ""
+    )
+
     # --- Build YAML ---
     yaml_text = f"""\
 # =============================================================================
@@ -888,7 +894,7 @@ subset_filters:
   default:
     "Assay Type": "{assay}"
 {secondary_filter_block}
-active_subset: "default"{f'  # TODO: consider switching to a subgroup filter' if secondary_filter_block else ''}
+active_subset: "default"{active_subset_comment}
 
 # -- Reference genome ---------------------------------------------------------
 {ref_comment}

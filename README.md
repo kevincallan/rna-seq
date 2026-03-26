@@ -90,7 +90,7 @@ All steps are automated and config-driven. By default the pipeline runs a single
 | 6 | `07_featurecounts` | Count reads per gene (all option sets) | Count matrices, `featurecounts_summary.tsv` |
 | 7 | `08_filter_matrix` | Remove lowly-expressed genes | Filtered matrices, `filtering_summary.tsv` |
 | 8 | `09_deseq2` | DE analysis for every count option set | DE tables, PCA/MA/volcano plots, gene lists |
-| 9 | `10_compare_methods` | Compare methods, select count-comparison + visualisation branches | `method_comparison.md`, `selected_count_comparison.tsv`, `selected_visualisation.tsv`, `selected_analysis.tsv` (legacy) |
+| 9 | `10_compare_methods` | Compare methods, select primary + comparison + visualisation branches | `method_comparison.md`, `selected_analysis.tsv`, `selected_count_comparison.tsv`, `selected_visualisation.tsv` |
 | 10 | `06_bigwig` | Generate coverage tracks (CPM + DESeq2-scaled) | BigWig files for IGV |
 | 11 | `11_make_report` | Generate combined report with health checks | `report.md`, `report.html` |
 
@@ -109,12 +109,13 @@ The pipeline treats the featureCounts option set as a first-class analysis dimen
 - **DE output paths** include the count option: `<trim>/deseq2/<mapper>/<mapper_opt>/<count_opt>/<contrast>/`
 - **The report** shows results for every analysis unit with clear labelling
 
-After comparison, the pipeline writes two explicit selected branches:
+After comparison, the pipeline writes three selected-branch files:
 
-- `selected_count_comparison.tsv` -- used for featureCounts/DE interpretation
-- `selected_visualisation.tsv` -- used for selected-only BigWig generation
+- `selected_analysis.tsv` -- primary analysis branch for reporting
+- `selected_count_comparison.tsv` -- sensitivity-comparison branch
+- `selected_visualisation.tsv` -- branch used for BigWig coverage tracks
 
-For backward compatibility, `selected_analysis.tsv` is still written and mirrors the count-comparison selection.
+When the `selection:` policy is active, the primary and visualisation branches are set explicitly. When absent, automatic ranking selects them and `selected_analysis.tsv` mirrors count-comparison for backward compatibility.
 
 ---
 
@@ -174,7 +175,7 @@ For backward compatibility, `selected_analysis.tsv` is still written and mirrors
 - `compare_methods`: when `true`, also run `comparison_methods`
 - `comparison_methods`: ordered list, deduplicated with primary preserved first
 
-Template defaults are exam-friendly:
+Template defaults focus on the simplest defensible workflow:
 
 - `primary_method: cutadapt`
 - `compare_methods: false`
@@ -197,6 +198,56 @@ Wrong strandedness is the most common cause of low assigned-read rates. The pipe
 ```
 
 This requires step 5 (mapping) to have completed first.
+
+---
+
+## Setting Up a New Dataset
+
+The metadata inspector can generate a complete draft config for a new dataset:
+
+```bash
+# Inspect metadata (summary only):
+./py scripts/inspect_metadata.py /data/GSEXXXXX/metadata.csv
+
+# Generate a draft config (compact summary, no legacy dump):
+./py scripts/inspect_metadata.py /data/GSEXXXXX/metadata.csv \
+    --write-config config/config_GSEXXXXX.yaml
+
+# Generate a minimal single-branch config:
+./py scripts/inspect_metadata.py /data/GSEXXXXX/metadata.csv \
+    --write-config config/config_GSEXXXXX.yaml --minimal
+
+# Also print the full inspector dump:
+./py scripts/inspect_metadata.py /data/GSEXXXXX/metadata.csv \
+    --write-config config/config_GSEXXXXX.yaml --verbose
+```
+
+### Config generator flags
+
+| Flag | Purpose |
+|------|---------|
+| `--write-config PATH` | Write a full draft YAML config to the given path |
+| `--assay TYPE` | Assay type filter (default: `RNA-Seq`) |
+| `--dataset-name NAME` | Override inferred project name |
+| `--condition-col COL` | Override auto-detected condition column |
+| `--reference-level LEVEL` | Override auto-detected DE reference level |
+| `--layout paired\|single` | Override auto-detected library layout |
+| `--minimal` | Single-branch config: cutadapt-only, STAR-default-only, one featureCounts option set |
+| `--verbose` | Also print the full legacy inspector output when using `--write-config` |
+
+### What the generator does
+
+1. Reads the metadata CSV
+2. Matches run IDs to FASTQs actually present on disk
+3. Filters to the specified assay type (default: RNA-Seq)
+4. Infers layout from matched FASTQ pairs
+5. Picks the best condition column from the **matched subset only**
+6. Generates concise condition labels using a biological term lookup (wild-type -> wt, tet2-/- -> tet2, etc.)
+7. Detects secondary grouping columns that also vary in the matched subset
+8. Generates subgroup `subset_filters` when a secondary axis is found
+9. Inserts TODO comments wherever confidence is low
+
+See `config/examples/` for reference configs showing simple and secondary-grouping scenarios.
 
 ---
 
@@ -233,9 +284,46 @@ featurecounts:
       fraction: true
 ```
 
-### Selected analysis branches
+### Branch selection policy
 
-The pipeline auto-selects separate branches for interpretation and visualisation. Optional manual overrides:
+The pipeline selects three branch roles in step 10:
+
+| Role | File written | Purpose |
+|------|-------------|---------|
+| **Primary analysis** | `selected_analysis.tsv` | Reporting, DE interpretation |
+| **Count-comparison** | `selected_count_comparison.tsv` | Sensitivity analysis |
+| **Visualisation** | `selected_visualisation.tsv` | BigWig / IGV coverage tracks |
+
+#### Automatic selection (default)
+
+When no `selection:` block is present, step 10 auto-ranks branches using DE validity, assigned-read percentage, and gene retention. `selected_analysis.tsv` mirrors count-comparison for backward compatibility.
+
+#### Explicit selection policy
+
+Add a `selection:` block to your config to lock branches deterministically:
+
+```yaml
+selection:
+  preferred_trim_method: "cutadapt"
+  preferred_mapper: "star"
+  preferred_mapper_option_set: "default"
+  primary_count_option_set: "default"
+  comparison_count_option_sets:
+    - "default"
+    - "multimapper"
+```
+
+When `selection:` is present:
+
+- `selected_analysis.tsv` and `selected_visualisation.tsv` point to the **primary** branch
+- `selected_count_comparison.tsv` points to the **comparison** branch
+- Older manual selectors (`selected_count_comparison:`, `selected_visualisation:`) are ignored
+- The primary branch must exist and not be redundant (RuntimeError otherwise)
+- Missing DE results trigger a warning but do not prevent selection
+
+#### Legacy manual overrides
+
+These still work when `selection:` is absent:
 
 ```yaml
 selected_count_comparison:
@@ -342,12 +430,13 @@ The report includes a **Pipeline Health** section showing:
 
 ### Selected branches
 
-The report highlights both selected roles:
+The report highlights all selected roles with markers on each analysis unit:
 
-- **Count-comparison branch** for featureCounts/DE interpretation
-- **Visualisation branch** for selected-only BigWig generation
+- **PRIMARY** -- the primary analysis branch used for reporting
+- **COUNT_COMPARISON** -- the sensitivity-comparison branch
+- **VISUALISATION** -- the branch used for BigWig coverage tracks
 
-The legacy `selected_analysis.tsv` is retained for compatibility and mirrors the count-comparison selection.
+When the `selection:` policy is active, `selected_analysis.tsv` points to the primary branch (not the count-comparison branch). When absent, it mirrors count-comparison for backward compatibility.
 
 ---
 
@@ -371,7 +460,11 @@ Makefile                         # Convenience targets
 README.md                        # This file
 config/
   config.yaml                    # Mouse GSE48519 configuration
+  config_GSE104853.yaml          # Human miRNA-125a configuration
   config_template.yaml           # Blank template for new datasets
+  examples/
+    example_simple_two_condition.yaml   # Reference: simple two-condition design
+    example_secondary_grouping.yaml     # Reference: secondary grouping + subgroup filters
 src/
   utils.py                       # Logging, subprocess, config loading
   metadata.py                    # CSV parsing, design table, symlinks
@@ -380,7 +473,7 @@ src/
 scripts/
   run_pipeline.py                # Orchestrator (profiles, step ordering)
   run_strand_test.py             # Strandedness verification helper
-  inspect_metadata.py            # Metadata CSV inspector
+  inspect_metadata.py            # Metadata CSV inspector + draft config generator
   00_validate_env.py             # Environment validation
   01_prepare_samples.py          # Metadata parsing + sample prep
   02_trim_reads.py               # Read trimming
@@ -400,6 +493,7 @@ tests/
   test_path_integrity.py         # Cross-step path chain tests
   test_profiles.py               # Execution profile and step-order tests
   test_reliability_paths.py      # Run isolation/cache/BAM reliability tests
+  test_trim_method_resolution.py # Trimming method resolution tests
 ```
 
 ---
