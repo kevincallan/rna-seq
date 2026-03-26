@@ -137,13 +137,16 @@ comparisons:
     denominator: "ctrl"
 
 # -- Selection policy ---------------------------------------------------------
-selection:
-  preferred_trim_method: "cutadapt"
-  preferred_mapper: "star"
-  preferred_mapper_option_set: "default"
-  primary_count_option_set: "default"
-  comparison_count_option_sets:
-    - "default"
+# Single-branch config: only cutadapt / star / default / default is generated.
+# Uncomment and adjust if you add more branches later.
+#
+# selection:
+#   preferred_trim_method: "cutadapt"
+#   preferred_mapper: "star"
+#   preferred_mapper_option_set: "default"
+#   primary_count_option_set: "default"
+#   comparison_count_option_sets:
+#     - "default"
 
 # -- BigWig parameters --------------------------------------------------------
 bigwig:

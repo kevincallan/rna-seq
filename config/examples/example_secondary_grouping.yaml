@@ -52,11 +52,11 @@ subset_filters:
   # Non-empty values: differentiation day 3 (6)
   # Missing/blank rows: 6
   # Consider switching active_subset to one subgroup for a cleaner DE comparison.
-  differentiation_day3:
+  day_3:
     "Assay Type": "RNA-Seq"
     "differentiation": "differentiation day 3"
 
-active_subset: "default"  # TODO: switch to "differentiation_day3" if needed
+active_subset: "default"  # TODO: consider switching to a subgroup filter
 
 # -- Reference genome ---------------------------------------------------------
 # Auto-detected: mouse
@@ -156,13 +156,16 @@ comparisons:
     denominator: "wt"
 
 # -- Selection policy ---------------------------------------------------------
-selection:
-  preferred_trim_method: "cutadapt"
-  preferred_mapper: "star"
-  preferred_mapper_option_set: "default"
-  primary_count_option_set: "default"
-  comparison_count_option_sets:
-    - "default"
+# Single-branch config: only cutadapt / star / default / default is generated.
+# Uncomment and adjust if you add more branches later.
+#
+# selection:
+#   preferred_trim_method: "cutadapt"
+#   preferred_mapper: "star"
+#   preferred_mapper_option_set: "default"
+#   primary_count_option_set: "default"
+#   comparison_count_option_sets:
+#     - "default"
 
 # -- BigWig parameters --------------------------------------------------------
 bigwig:
